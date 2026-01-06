@@ -1,0 +1,8 @@
+node_modules
+.vscode
+.env
+.env.*
+README-calculations.md
+Product Requirements Document.pdf
+Logo.ai
+src/components/Logo.svg

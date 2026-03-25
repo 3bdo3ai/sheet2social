@@ -1,12 +1,17 @@
-import { NextRequest, NextResponse } from 'next/server';
+import fs from "node:fs/promises";
+import path from "node:path";
+
+import { NextRequest, NextResponse } from "next/server";
 
 // Helper to get environment variables with validation
+const LOCAL_CONTENT_PATH = path.join(process.cwd(), "src", "content", "content.json");
+
 function getEnvVars() {
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-    throw new Error('Missing required Supabase environment variables. Please check your .env.local file.');
+    return null;
   }
 
   return {
@@ -17,9 +22,17 @@ function getEnvVars() {
   };
 }
 
+async function readLocalContent() {
+  const raw = await fs.readFile(LOCAL_CONTENT_PATH, "utf8");
+  return JSON.parse(raw);
+}
+
+async function writeLocalContent(content: unknown) {
+  await fs.writeFile(LOCAL_CONTENT_PATH, JSON.stringify(content, null, 2), "utf8");
+}
+
 export async function PUT(request: NextRequest) {
   try {
-    const { PUBLIC_URL, STORAGE_API_URL, SERVICE_ROLE_KEY } = getEnvVars();
     const { priceData } = await request.json();
 
     if (!Array.isArray(priceData)) {
@@ -32,24 +45,31 @@ export async function PUT(request: NextRequest) {
       }
     }
 
-    // Fetch current remote content
-    const res = await fetch(PUBLIC_URL);
+    const env = getEnvVars();
+
+    if (!env) {
+      const localContent = await readLocalContent();
+      localContent.priceData = priceData;
+      await writeLocalContent(localContent);
+      return NextResponse.json({ success: true, source: "local" });
+    }
+
+    const res = await fetch(env.PUBLIC_URL);
     if (!res.ok) {
       console.error('Failed to fetch remote content for price update:', res.statusText);
       return NextResponse.json({ error: 'Failed to fetch remote content' }, { status: 502 });
     }
+
     const content = await res.json();
 
-    // Update priceData
     content.priceData = priceData;
 
-    // Write updated content back to Supabase storage
-    const upsertRes = await fetch(STORAGE_API_URL, {
+    const upsertRes = await fetch(env.STORAGE_API_URL, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        apikey: SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        apikey: env.SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SERVICE_ROLE_KEY}`,
       },
       body: JSON.stringify(content),
     });
@@ -60,7 +80,7 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: 'Failed to update remote content' }, { status: 502 });
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, source: "supabase" });
   } catch (error) {
     console.error('Error updating price data:', error);
     return NextResponse.json({ error: 'Failed to update price data' }, { status: 500 });

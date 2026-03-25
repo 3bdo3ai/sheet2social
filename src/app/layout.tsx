@@ -9,8 +9,8 @@ const cairo = Cairo({
 });
 
 export const metadata: Metadata = {
-  title: "Your App Title",
-  description: "Your app description",
+  title: "Sheet2Social Control Center",
+  description: "Professional automation dashboard for accounts, groups, posts, and workflow control.",
 };
 
 export default function RootLayout({
@@ -19,8 +19,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="ar" dir="rtl">
-      <body className={`${cairo.variable} font-cairo antialiased bg-white`}>
+    <html lang="en" dir="ltr">
+      <body className={`${cairo.variable} antialiased`}>
         {children}
       </body>
     </html>

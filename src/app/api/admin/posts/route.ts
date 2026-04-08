@@ -8,8 +8,10 @@ import {
   appendCsvPost,
   deleteCsvPostByIndex,
   readCsvPosts,
+  writeCsvPosts,
   updateCsvPostByIndex,
 } from "@/lib/csvPosts";
+import { parseCsv, validateCsvHeaders } from "@/lib/csvImport";
 import { initializeDbStorage, readParquetRecords } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -39,6 +41,67 @@ export async function POST(request: Request) {
   await initializeDbStorage();
 
   const formData = await request.formData();
+  const action = String(formData.get("action") ?? "single").trim();
+
+  if (action === "bulk") {
+    const groupId = String(formData.get("groupId") ?? "").trim();
+    const file = formData.get("file");
+
+    if (!groupId) {
+      return NextResponse.json({ error: "groupId is required" }, { status: 400 });
+    }
+
+    if (!(file instanceof File)) {
+      return NextResponse.json({ error: "CSV file is required" }, { status: 400 });
+    }
+
+    const groups = await readParquetRecords("fbGroups");
+    const group = groups.find((item) => item.id === groupId);
+
+    if (!group) {
+      return NextResponse.json({ error: "Group not found" }, { status: 404 });
+    }
+
+    const csvText = await file.text();
+    const parsed = parseCsv(csvText);
+    const schemaError = validateCsvHeaders(parsed.headers, [
+      "post_text",
+      "image_url",
+      "comment_link",
+      "status",
+    ]);
+
+    if (schemaError) {
+      return NextResponse.json({ error: schemaError }, { status: 400 });
+    }
+
+    const validRows = parsed.rows
+      .map((row) => ({
+        post_text: row.post_text,
+        image_url: row.image_url,
+        comment_link: row.comment_link,
+        status: row.status,
+      }))
+      .filter((row) => row.post_text.trim().length > 0);
+
+    if (validRows.length === 0) {
+      return NextResponse.json({ error: "No valid rows found in CSV" }, { status: 400 });
+    }
+
+    const existing = await readCsvPosts(group.csvPath);
+    await writeCsvPosts(group.csvPath, [
+      ...existing.map((item) => ({
+        post_text: item.post_text,
+        image_url: item.image_url,
+        comment_link: item.comment_link,
+        status: item.status,
+      })),
+      ...validRows,
+    ]);
+
+    return NextResponse.json({ success: true, importedCount: validRows.length }, { status: 201 });
+  }
+
   const groupId = String(formData.get("groupId") ?? "").trim();
   const postText = String(formData.get("postText") ?? "").trim();
   const commentLink = String(formData.get("commentLink") ?? "").trim();

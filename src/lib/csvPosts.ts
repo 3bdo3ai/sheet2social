@@ -25,10 +25,27 @@ const CSV_HEADERS: Array<keyof CsvPostRecord> = [
   "status",
 ];
 
+const CSV_BASE_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "csvs");
+
 function resolveCsvPath(csvFilePath: string): string {
-  return path.isAbsolute(csvFilePath)
-    ? csvFilePath
-    : path.join(process.cwd(), csvFilePath);
+  const normalized = csvFilePath.replace(/\\/g, "/").trim();
+  const fileName = path.basename(normalized);
+
+  if (!fileName || fileName === "." || fileName === "/") {
+    throw new Error("Invalid CSV file path.");
+  }
+
+  // Keep file operations scoped to the managed csv directory.
+  return path.join(CSV_BASE_DIR, fileName);
+}
+
+function normalizeStatus(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function isCompletedStatus(value: string): boolean {
+  const normalized = normalizeStatus(value);
+  return normalized === "posted" || normalized === "done" || normalized === "completed" || normalized === "success";
 }
 
 export async function ensureCsvFile(csvFilePath: string): Promise<string> {
@@ -159,4 +176,8 @@ export async function deleteCsvPostByIndex(
   );
 
   return true;
+}
+
+export function isCsvPostCompleted(status: string): boolean {
+  return isCompletedStatus(status);
 }

@@ -20,6 +20,15 @@ type Post = {
   status: string;
 };
 
+function normalizePostStatus(status: string): string {
+  return status.trim().toLowerCase();
+}
+
+function isCompletedPostStatus(status: string): boolean {
+  const normalized = normalizePostStatus(status);
+  return normalized === "posted" || normalized === "done" || normalized === "completed" || normalized === "success";
+}
+
 export default function PostsPage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
@@ -32,6 +41,9 @@ export default function PostsPage() {
   const [editPostText, setEditPostText] = useState("");
   const [editCommentLink, setEditCommentLink] = useState("");
   const [editStatus, setEditStatus] = useState("");
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkGroupId, setBulkGroupId] = useState("");
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
 
   async function loadData() {
     const [groupsRes, postsRes] = await Promise.all([
@@ -49,8 +61,8 @@ export default function PostsPage() {
 
   async function addPost(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     form.set("addComment", String(includeComment));
 
     await fetch("/api/admin/posts", {
@@ -58,7 +70,7 @@ export default function PostsPage() {
       body: form,
     });
 
-    event.currentTarget.reset();
+    formElement.reset();
     setIncludeComment(false);
     setOpen(false);
     await loadData();
@@ -112,6 +124,52 @@ export default function PostsPage() {
     await loadData();
   }
 
+  async function uploadBulkPosts(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!bulkGroupId || !bulkFile) {
+      return;
+    }
+
+    const form = new FormData();
+    form.set("action", "bulk");
+    form.set("groupId", bulkGroupId);
+    form.set("file", bulkFile);
+
+    const response = await fetch("/api/admin/posts", {
+      method: "POST",
+      body: form,
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      alert(payload.error || "Failed to import CSV");
+      return;
+    }
+
+    setBulkOpen(false);
+    setBulkGroupId("");
+    setBulkFile(null);
+    await loadData();
+  }
+
+  function downloadTemplate() {
+    const content = [
+      "post_text,image_url,comment_link,status",
+      'Example post text,https://example.com/image.jpg,https://example.com/comment,',
+    ].join("\n");
+
+    const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "posts-template.csv";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
   const normalizedSearch = search.trim().toLowerCase();
   const filteredPosts = posts.filter((post) => {
     const bySearch = normalizedSearch
@@ -122,14 +180,14 @@ export default function PostsPage() {
           .includes(normalizedSearch)
       : true;
     const byGroup = groupFilter === "all" ? true : post.groupId === groupFilter;
-    const postStatus = post.status?.trim().toLowerCase() || "pending";
+    const postStatus = isCompletedPostStatus(post.status) ? "done" : normalizePostStatus(post.status) || "pending";
     const byStatus = statusFilter === "all" ? true : postStatus === statusFilter;
     return bySearch && byGroup && byStatus;
   });
 
   const withComments = posts.filter((post) => Boolean(post.comment_link)).length;
   const withImages = posts.filter((post) => Boolean(post.image_url)).length;
-  const doneCount = posts.filter((post) => post.status?.trim().toLowerCase() === "done").length;
+  const doneCount = posts.filter((post) => isCompletedPostStatus(post.status)).length;
   const pendingCount = posts.length - doneCount;
 
   return (
@@ -139,10 +197,18 @@ export default function PostsPage() {
           <h1 className="app-title">Posts Management</h1>
           <p className="app-subtitle">Create and manage your posts</p>
         </div>
-        <button onClick={() => setOpen(true)} className="luxury-btn inline-flex items-center gap-2 rounded-xl px-5 py-3 font-semibold">
-          <PlusIcon className="h-4 w-4" />
-          Add Post
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={downloadTemplate} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">
+            Download Template
+          </button>
+          <button onClick={() => setBulkOpen(true)} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">
+            Upload CSV
+          </button>
+          <button onClick={() => setOpen(true)} className="luxury-btn inline-flex items-center gap-2 rounded-xl px-5 py-3 font-semibold">
+            <PlusIcon className="h-4 w-4" />
+            Add Post
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-3 md:grid-cols-4">
@@ -329,6 +395,54 @@ export default function PostsPage() {
               <div className="mt-2 flex justify-end gap-2">
                 <button type="button" onClick={() => setOpen(false)} className="btn-subtle">Cancel</button>
                 <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Save Post</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {bulkOpen ? (
+        <div className="app-modal-shell">
+          <div className="app-modal max-w-xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-2xl font-semibold">Bulk Upload Posts</h2>
+              <button onClick={() => setBulkOpen(false)} className="btn-subtle inline-flex items-center justify-center">
+                <XMarkIcon className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={uploadBulkPosts} className="grid gap-3">
+              <label className="grid gap-1 text-sm">
+                <span className="app-label">Target Group</span>
+                <select
+                  value={bulkGroupId}
+                  onChange={(event) => setBulkGroupId(event.target.value)}
+                  required
+                  className="modal-input"
+                >
+                  <option value="">Select group</option>
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>{group.name || group.groupId}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="grid gap-1 text-sm">
+                <span className="app-label">CSV File</span>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  required
+                  onChange={(event) => setBulkFile(event.target.files?.[0] ?? null)}
+                  className="modal-input"
+                />
+              </label>
+
+              <p className="text-xs text-[#9fb4d5]">Required schema: post_text,image_url,comment_link,status</p>
+
+              <div className="mt-2 flex justify-end gap-2">
+                <button type="button" onClick={() => setBulkOpen(false)} className="btn-subtle">Cancel</button>
+                <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Import CSV</button>
               </div>
             </form>
           </div>

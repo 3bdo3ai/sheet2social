@@ -7,6 +7,7 @@ import {
   ChartBarSquareIcon,
   Cog6ToothIcon,
   FolderOpenIcon,
+  BeakerIcon,
   PlayCircleIcon,
   ServerStackIcon,
   UserGroupIcon,
@@ -15,6 +16,7 @@ import {
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: ChartBarSquareIcon },
   { href: "/posts", label: "Posts", icon: FolderOpenIcon },
+  { href: "/comment-test", label: "Comment Test", icon: BeakerIcon },
   { href: "/groups", label: "Groups", icon: UserGroupIcon },
   { href: "/accounts", label: "Accounts", icon: ServerStackIcon },
   { href: "/automation", label: "Automation", icon: PlayCircleIcon },

@@ -1,12 +1,12 @@
 {
   "state": "stopped",
   "settings": {
-    "parallelAccounts": 3,
     "waitIntervalMinutes": 1,
-    "delayBetweenAccountsMinutes": 1,
+    "delayBetweenAccountsMinutes": 0,
     "postsPerGroup": 15,
-    "commentWithPostImage": false,
+    "parallelAccounts": 3,
+    "commentWithPostImage": true,
     "proxyRotationEnabled": false
   },
-  "updatedAt": "2026-03-25T02:48:22.834Z"
+  "updatedAt": "2026-04-07T23:23:24.477Z"
 }

@@ -20,6 +20,8 @@ export default function GroupsPage() {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [assignmentFilter, setAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
 
   async function loadItems() {
     const [groupsRes, accountsRes] = await Promise.all([
@@ -37,14 +39,14 @@ export default function GroupsPage() {
 
   async function addGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-
-    const formData = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const formData = new FormData(formElement);
     await fetch("/api/admin/fb-groups", {
       method: "POST",
       body: formData,
     });
 
-    event.currentTarget.reset();
+    formElement.reset();
     setOpen(false);
     await loadItems();
   }
@@ -79,6 +81,50 @@ export default function GroupsPage() {
     await loadItems();
   }
 
+  async function uploadBulkGroups(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!bulkFile) {
+      return;
+    }
+
+    const form = new FormData();
+    form.set("action", "bulk");
+    form.set("file", bulkFile);
+
+    const response = await fetch("/api/admin/fb-groups", {
+      method: "POST",
+      body: form,
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string };
+      alert(payload.error || "Failed to import CSV");
+      return;
+    }
+
+    setBulkOpen(false);
+    setBulkFile(null);
+    await loadItems();
+  }
+
+  function downloadTemplate() {
+    const content = [
+      "group_id,name,fb_account_id,is_active",
+      "1234567890,My Group,,true",
+    ].join("\n");
+
+    const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "groups-template.csv";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
   const filteredItems = items.filter((item) => {
     const byText = search.trim()
       ? [item.name, item.groupId].filter(Boolean).join(" ").toLowerCase().includes(search.trim().toLowerCase())
@@ -103,10 +149,18 @@ export default function GroupsPage() {
           <h1 className="app-title">Groups Management</h1>
           <p className="app-subtitle">Manage your Facebook groups</p>
         </div>
-        <button onClick={() => setOpen(true)} className="luxury-btn inline-flex items-center gap-2 rounded-xl px-5 py-3 font-semibold">
-          <PlusIcon className="h-4 w-4" />
-          Add Group
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={downloadTemplate} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">
+            Download Template
+          </button>
+          <button onClick={() => setBulkOpen(true)} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">
+            Upload CSV
+          </button>
+          <button onClick={() => setOpen(true)} className="luxury-btn inline-flex items-center gap-2 rounded-xl px-5 py-3 font-semibold">
+            <PlusIcon className="h-4 w-4" />
+            Add Group
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-3 md:grid-cols-4">
@@ -218,6 +272,39 @@ export default function GroupsPage() {
               <div className="mt-2 flex justify-end gap-2">
                 <button type="button" onClick={() => setOpen(false)} className="btn-subtle">Cancel</button>
                 <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Save Group</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {bulkOpen ? (
+        <div className="app-modal-shell">
+          <div className="app-modal max-w-xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-2xl font-semibold">Bulk Upload Groups</h2>
+              <button onClick={() => setBulkOpen(false)} className="btn-subtle inline-flex items-center justify-center">
+                <XMarkIcon className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={uploadBulkGroups} className="grid gap-3">
+              <label className="grid gap-1 text-sm">
+                <span className="app-label">CSV File</span>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  required
+                  onChange={(event) => setBulkFile(event.target.files?.[0] ?? null)}
+                  className="modal-input"
+                />
+              </label>
+
+              <p className="text-xs text-[#9fb4d5]">Required schema: group_id,name,fb_account_id,is_active</p>
+
+              <div className="mt-2 flex justify-end gap-2">
+                <button type="button" onClick={() => setBulkOpen(false)} className="btn-subtle">Cancel</button>
+                <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Import CSV</button>
               </div>
             </form>
           </div>

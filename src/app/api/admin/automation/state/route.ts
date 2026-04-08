@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 
 export async function GET() {
   const state = await readAutomationState();
-  return NextResponse.json({ state: state.state });
+  return NextResponse.json(state);
 }
 
 export async function POST(request: Request) {
@@ -20,5 +20,5 @@ export async function POST(request: Request) {
   }
 
   const next = await writeAutomationState(body.state);
-  return NextResponse.json({ state: next.state });
+  return NextResponse.json(next);
 }

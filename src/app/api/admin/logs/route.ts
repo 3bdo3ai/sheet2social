@@ -19,7 +19,16 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const limit = Math.max(1, Number(searchParams.get("limit") ?? 150));
 
-  const records = await readParquetRecords("logs");
+  let records: AutomationLog[] = [];
+  try {
+    records = await readParquetRecords("logs");
+  } catch (error) {
+    // During high-frequency writes, parquet reads can transiently fail; retry is handled
+    // in the DB layer and this fallback keeps the UI from failing hard.
+    console.error("[logs] Failed to read logs parquet", error);
+    return NextResponse.json([]);
+  }
+
   const latest = records.slice(-limit).reverse();
 
   return NextResponse.json(latest);

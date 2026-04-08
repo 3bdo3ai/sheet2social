@@ -4,11 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js dev",
+    "dev:headless": "cross-env WORKER_VISIBLE_BROWSER=false NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js dev",
     "build": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js build",
     "start": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js start",
     "lint": "next lint",
     "worker:engine": "tsx worker/engine.ts",
-    "worker:once": "tsx worker/engine.ts --once"
+    "worker:once": "tsx worker/engine.ts --once",
+    "worker:visible": "cross-env WORKER_VISIBLE_BROWSER=true WORKER_VISUAL_TRACE=true WORKER_SKIP_PREFLIGHT_IN_VISIBLE_MODE=true WORKER_DEBUG_BROWSER_HOLD_FAILURE_ONLY=true WORKER_DEBUG_BROWSER_HOLD_MS=15000 tsx worker/engine.ts",
+    "comment:test": "tsx scripts/comment-test.ts"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -21,6 +24,7 @@
     "googleapis": "^171.4.0",
     "next": "^16.2.1",
     "parquetjs-lite": "^0.8.7",
+    "proxy-chain": "^2.7.1",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "selenium-webdriver": "^4.41.0",

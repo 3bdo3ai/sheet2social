@@ -1,106 +1,463 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { PlayIcon, StopIcon } from "@heroicons/react/24/outline";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowPathIcon, PlayIcon, StopIcon } from "@heroicons/react/24/outline";
+
+type LogLevel = "info" | "success" | "error";
 
 type LogItem = {
   id: string;
-  level: "info" | "success" | "error";
+  level: LogLevel;
   message: string;
+  accountId?: string;
+  groupId?: string;
+  sheetRow?: number;
+  details?: string;
   createdAt: string;
 };
 
+type AutomationStatePayload = {
+  state: "running" | "stopped";
+  updatedAt?: string;
+};
+
+type FlowStageId =
+  | "worker"
+  | "startup"
+  | "selection"
+  | "session"
+  | "publish"
+  | "cycle";
+
+type FlowStageStatus = "idle" | "active" | "success" | "error";
+
+type FlowStage = {
+  id: FlowStageId;
+  title: string;
+  description: string;
+};
+
+type FlowStageSnapshot = FlowStage & {
+  status: FlowStageStatus;
+  lastEvent?: LogItem;
+};
+
+const FLOW_STAGES: FlowStage[] = [
+  {
+    id: "worker",
+    title: "Worker Heartbeat",
+    description: "Boot and runtime stability",
+  },
+  {
+    id: "startup",
+    title: "Automation Start",
+    description: "State switched and cycle initialized",
+  },
+  {
+    id: "selection",
+    title: "Selection Check",
+    description: "Active accounts/groups validation",
+  },
+  {
+    id: "session",
+    title: "Session Preflight",
+    description: "Login, cookies, and proxy readiness",
+  },
+  {
+    id: "publish",
+    title: "Publishing",
+    description: "Per-group posting execution",
+  },
+  {
+    id: "cycle",
+    title: "Cycle Control",
+    description: "Loop continuation and crash handling",
+  },
+];
+
+const FLOW_STAGE_INDEX: Record<FlowStageId, number> = {
+  worker: 0,
+  startup: 1,
+  selection: 2,
+  session: 3,
+  publish: 4,
+  cycle: 5,
+};
+
+function classifyLogStage(message: string): FlowStageId {
+  const text = message.toLowerCase();
+
+  if (
+    text.includes("worker cycle") ||
+    text.includes("controller loop") ||
+    text.includes("one-shot")
+  ) {
+    return "cycle";
+  }
+
+  if (
+    text.includes("worker started") ||
+    text.includes("worker failed during startup") ||
+    text.includes("unhandled promise") ||
+    text.includes("uncaught exception")
+  ) {
+    return "worker";
+  }
+
+  if (text.includes("automation started") || text.includes("automation is stopped")) {
+    return "startup";
+  }
+
+  if (
+    text.includes("selection ready") ||
+    text.includes("no active accounts or groups") ||
+    text.includes("selected account")
+  ) {
+    return "selection";
+  }
+
+  if (
+    text.includes("preflight") ||
+    text.includes("session") ||
+    text.includes("authenticated") ||
+    text.includes("requires login") ||
+    text.includes("logged in successfully")
+  ) {
+    return "session";
+  }
+
+  if (
+    text.includes("[publish]") ||
+    text.includes("starting post publish") ||
+    text.includes("post failed") ||
+    text.includes("post published") ||
+    text.includes("[posted]") ||
+    text.includes("[failed]") ||
+    text.includes("csv processing") ||
+    text.includes("no pending posts") ||
+    text.includes("posted successfully")
+  ) {
+    return "publish";
+  }
+
+  return "cycle";
+}
+
+function buildFlowStageSnapshots(logs: LogItem[]): FlowStageSnapshot[] {
+  const snapshots = FLOW_STAGES.map((stage) => ({
+    ...stage,
+    status: "idle" as FlowStageStatus,
+    lastEvent: undefined as LogItem | undefined,
+  }));
+
+  for (const entry of logs) {
+    const stage = snapshots[FLOW_STAGE_INDEX[classifyLogStage(entry.message)]];
+    stage.lastEvent = entry;
+
+    if (entry.level === "error") {
+      stage.status = "error";
+      continue;
+    }
+
+    if (entry.level === "success") {
+      stage.status = "success";
+      continue;
+    }
+
+    stage.status = "active";
+  }
+
+  return snapshots;
+}
+
+function formatRelativeTime(isoTimestamp: string): string {
+  const diffMs = Date.now() - new Date(isoTimestamp).getTime();
+
+  if (!Number.isFinite(diffMs) || diffMs < 0) {
+    return "just now";
+  }
+
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) {
+    return `${seconds}s ago`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function trimMessage(message: string, maxLength = 120): string {
+  if (message.length <= maxLength) {
+    return message;
+  }
+
+  return `${message.slice(0, maxLength - 1)}...`;
+}
+
+function stageToneClass(status: FlowStageStatus): string {
+  if (status === "error") return "border-[#884152] bg-[#2a1720]";
+  if (status === "success") return "border-[#2f735c] bg-[#102b22]";
+  if (status === "active") return "border-[#426798] bg-[#152a49]";
+  return "border-[var(--border)] bg-[#0f1f3a]";
+}
+
+function stageBadgeClass(status: FlowStageStatus): string {
+  if (status === "error") return "border-[#ab5568] bg-[#4a1f2a] text-[#ffc9d3]";
+  if (status === "success") return "border-[#3d9878] bg-[#153e31] text-[#bff6df]";
+  if (status === "active") return "border-[#4f79ad] bg-[#1a3358] text-[#cde4ff]";
+  return "border-[var(--border)] bg-[#172947] text-[#acc4e6]";
+}
+
+function logLevelClass(level: LogLevel): string {
+  if (level === "error") return "border-[#a84a60] bg-[#3b1b26] text-[#ffc9d5]";
+  if (level === "success") return "border-[#2f8d6b] bg-[#12392c] text-[#bcf5dd]";
+  return "border-[#42669a] bg-[#152d4f] text-[#cae3ff]";
+}
+
+function extractScreenshotUrl(details?: string): string | undefined {
+  if (!details) {
+    return undefined;
+  }
+
+  const match = details.match(/Screenshot:\s*(\/automation-trace\/[^\s|]+)/i);
+  return match?.[1];
+}
+
+function stripScreenshotReference(details?: string): string | undefined {
+  if (!details) {
+    return undefined;
+  }
+
+  const cleaned = details
+    .replace(/(?:\s*\|\s*)?Screenshot:\s*\/automation-trace\/[^\s|]+/gi, "")
+    .trim();
+
+  return cleaned || undefined;
+}
+
+function inferIssueHint(message: string): string {
+  const text = message.toLowerCase();
+
+  if (text.includes("preflight") || text.includes("session") || text.includes("login")) {
+    return "Likely account session/login issue. Recheck credentials, 2FA secret, and session freshness.";
+  }
+
+  if (text.includes("proxy")) {
+    return "Likely proxy connectivity issue. Verify host, port, username/password, and outbound IP reachability.";
+  }
+
+  if (text.includes("csv")) {
+    return "Likely CSV input or file-path issue. Verify group CSV path exists and still has pending rows.";
+  }
+
+  if (text.includes("publish") || text.includes("post")) {
+    return "Likely UI publish-step issue. Check publish timeline events below to isolate the exact failed step.";
+  }
+
+  if (text.includes("worker")) {
+    return "Worker loop instability. Restart worker and inspect stack trace details in the error payload.";
+  }
+
+  return "Use the latest trace entries to locate the first failure and investigate details payload for root cause.";
+}
+
 export default function AutomationPage() {
-  const [logs, setLogs] = useState<LogItem[]>([]);
   const [rawLogs, setRawLogs] = useState<LogItem[]>([]);
   const [state, setState] = useState<"running" | "stopped">("stopped");
   const [levelFilter, setLevelFilter] = useState<"all" | "info" | "success" | "error">("all");
   const [search, setSearch] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
+  const [liveRefresh, setLiveRefresh] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement | null>(null);
 
-  async function loadState() {
-    const res = await fetch("/api/admin/automation/state");
-    const data = (await res.json()) as { state: "running" | "stopped" };
-    setState(data.state);
-  }
+  const loadData = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
 
-  async function loadLogs() {
-    const res = await fetch("/api/admin/logs?limit=200");
-    const data = (await res.json()) as LogItem[];
-    setRawLogs(data);
-  }
+    if (!silent) {
+      setLoading(true);
+    }
 
-  useEffect(() => {
-    loadState();
-    loadLogs();
-    const timer = setInterval(() => {
-      loadState();
-      loadLogs();
-    }, 2000);
-    return () => clearInterval(timer);
+    setIsRefreshing(true);
+
+    try {
+      const [stateRes, logsRes] = await Promise.all([
+        fetch("/api/admin/automation/state", { cache: "no-store" }),
+        fetch("/api/admin/logs?limit=280", { cache: "no-store" }),
+      ]);
+
+      if (!stateRes.ok || !logsRes.ok) {
+        throw new Error("Failed to load automation state/logs");
+      }
+
+      const stateData = (await stateRes.json()) as Partial<AutomationStatePayload>;
+      const logsData = (await logsRes.json()) as LogItem[];
+
+      setState(stateData.state === "running" ? "running" : "stopped");
+      setRawLogs(Array.isArray(logsData) ? logsData : []);
+      setRequestError(null);
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : "Unknown fetch error");
+    } finally {
+      setIsRefreshing(false);
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    const next = rawLogs.filter((entry) => {
-      const byLevel = levelFilter === "all" ? true : entry.level === levelFilter;
-      const bySearch = search.trim()
-        ? entry.message.toLowerCase().includes(search.trim().toLowerCase())
-        : true;
-      return byLevel && bySearch;
-    });
-
-    setLogs(next);
-  }, [rawLogs, levelFilter, search]);
+    void loadData();
+  }, [loadData]);
 
   useEffect(() => {
-    if (!autoScroll || !logRef.current) return;
-    logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [logs, autoScroll]);
+    if (!liveRefresh) {
+      return;
+    }
+
+    const intervalMs = state === "running" ? 2000 : 5000;
+    const timer = setInterval(() => {
+      void loadData({ silent: true });
+    }, intervalMs);
+
+    return () => clearInterval(timer);
+  }, [liveRefresh, loadData, state]);
+
+  const chronologicalLogs = useMemo(() => rawLogs.slice().reverse(), [rawLogs]);
+
+  const logs = useMemo(
+    () =>
+      chronologicalLogs.filter((entry) => {
+        const byLevel = levelFilter === "all" ? true : entry.level === levelFilter;
+        const bySearch = search.trim()
+          ? entry.message.toLowerCase().includes(search.trim().toLowerCase())
+          : true;
+        return byLevel && bySearch;
+      }),
+    [chronologicalLogs, levelFilter, search]
+  );
+
+  const stageSnapshots = useMemo(
+    () => buildFlowStageSnapshots(chronologicalLogs),
+    [chronologicalLogs]
+  );
+
+  const latestError = useMemo(
+    () => rawLogs.find((entry) => entry.level === "error"),
+    [rawLogs]
+  );
+  const latestErrorScreenshot = latestError ? extractScreenshotUrl(latestError.details) : undefined;
+  const latestErrorTextDetails = latestError
+    ? stripScreenshotReference(latestError.details)
+    : undefined;
+
+  const latestLogEntry = rawLogs[0];
+  const staleWhileRunning =
+    state === "running" &&
+    latestLogEntry !== undefined &&
+    Date.now() - new Date(latestLogEntry.createdAt).getTime() > 120_000;
+
+  const runLogs = useMemo(() => {
+    let latestStartIndex = -1;
+
+    for (let index = 0; index < chronologicalLogs.length; index += 1) {
+      if (chronologicalLogs[index].message.startsWith("Automation started.")) {
+        latestStartIndex = index;
+      }
+    }
+
+    if (latestStartIndex < 0) {
+      return chronologicalLogs;
+    }
+
+    return chronologicalLogs.slice(latestStartIndex);
+  }, [chronologicalLogs]);
+
+  const infoCount = rawLogs.filter((entry) => entry.level === "info").length;
+  const successCount = rawLogs.filter((entry) => entry.level === "success").length;
+  const errorCount = rawLogs.filter((entry) => entry.level === "error").length;
+
+  const runInfoCount = runLogs.filter((entry) => entry.level === "info").length;
+  const runSuccessCount = runLogs.filter((entry) => entry.level === "success").length;
+  const runErrorCount = runLogs.filter((entry) => entry.level === "error").length;
 
   const terminalText = useMemo(
     () =>
       logs.length === 0
         ? "Waiting for automation to start..."
         : logs
-            .slice()
-            .reverse()
             .map(
               (entry) =>
-                `[${new Date(entry.createdAt).toLocaleTimeString()}] ${entry.message}`
+                `[${new Date(entry.createdAt).toLocaleTimeString()}] [${classifyLogStage(
+                  entry.message
+                ).toUpperCase()}] ${entry.message}`
             )
             .join("\n"),
     [logs]
   );
 
-  const infoCount = rawLogs.filter((entry) => entry.level === "info").length;
-  const successCount = rawLogs.filter((entry) => entry.level === "success").length;
-  const errorCount = rawLogs.filter((entry) => entry.level === "error").length;
+  useEffect(() => {
+    if (!autoScroll || !logRef.current) return;
+    logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [terminalText, autoScroll]);
 
   async function clearLogs() {
-    await fetch("/api/admin/logs", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ olderThan: new Date(Date.now() + 60_000).toISOString() }),
-    });
-    await loadLogs();
+    try {
+      const response = await fetch("/api/admin/logs", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ olderThan: new Date(Date.now() + 60_000).toISOString() }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to clear logs");
+      }
+
+      await loadData({ silent: true });
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : "Unknown clear-logs error");
+    }
   }
 
   async function setAutomation(next: "running" | "stopped") {
-    await fetch("/api/admin/automation/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state: next }),
-    });
-    await loadState();
+    try {
+      const response = await fetch("/api/admin/automation/state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: next }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to update automation state");
+      }
+
+      await loadData({ silent: true });
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : "Unknown automation-state error");
+    }
   }
 
   return (
-    <section className="space-y-5">
+    <section className="space-y-5 animate-reveal-up">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="app-title">Automation Control</h1>
-          <p className="app-subtitle">Start and monitor automation</p>
+          <h1 className="app-title">Automation Flow Inspector</h1>
+          <p className="app-subtitle">
+            Visual trace of each automation stage with login screenshots so you can see exactly where it fails
+          </p>
+          <p className="mt-1 text-xs text-[#93b3da]">
+            Tip: set WORKER_VISIBLE_BROWSER=true before starting worker to open live Chrome windows during debugging.
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -123,6 +480,59 @@ export default function AutomationPage() {
             <StopIcon className="h-4 w-4" />
             Stop
           </button>
+          <button
+            onClick={() => void loadData({ silent: true })}
+            className="btn-subtle inline-flex items-center gap-1.5 text-xs"
+          >
+            <ArrowPathIcon className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {requestError ? (
+        <div className="rounded-xl border border-[#8f4a59] bg-[#321d27] px-3 py-2 text-sm text-[#ffd2dc]">
+          Data loading warning: {requestError}
+        </div>
+      ) : null}
+
+      <div className="app-card p-3">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm font-semibold uppercase tracking-[0.15em] text-[#a6c8f0]">FLOW STAGES</p>
+          <span className={`status-chip ${staleWhileRunning ? "status-stopped" : "status-running"}`}>
+            {latestLogEntry
+              ? `Last event ${formatRelativeTime(latestLogEntry.createdAt)}`
+              : "No events yet"}
+          </span>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {stageSnapshots.map((stage, index) => (
+            <div
+              key={stage.id}
+              className={`rounded-xl border p-3 text-sm ${stageToneClass(stage.status)}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-[#eaf4ff]">
+                  {index + 1}. {stage.title}
+                </p>
+                <span className={`rounded-full border px-2 py-0.5 text-[11px] ${stageBadgeClass(stage.status)}`}>
+                  {stage.status.toUpperCase()}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-[#a7c0e1]">{stage.description}</p>
+              <p className="mt-3 text-xs text-[#d8e8ff]">
+                {stage.lastEvent ? trimMessage(stage.lastEvent.message) : "Waiting for stage activity..."}
+              </p>
+              <p className="mt-1 text-[11px] text-[#90a9cc]">
+                {stage.lastEvent
+                  ? `${new Date(stage.lastEvent.createdAt).toLocaleTimeString()} (${formatRelativeTime(
+                      stage.lastEvent.createdAt
+                    )})`
+                  : "No updates"}
+              </p>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -141,8 +551,67 @@ export default function AutomationPage() {
             <p className="mt-1 text-xl font-semibold">{errorCount}</p>
           </div>
           <div className="rounded-xl border border-[var(--border)] bg-[#0f1f3a] p-3 text-sm">
-            <p className="text-[#a9c2e6]">Filtered View</p>
-            <p className="mt-1 text-xl font-semibold">{logs.length}</p>
+            <p className="text-[#a9c2e6]">Current Run Errors</p>
+            <p className="mt-1 text-xl font-semibold">{runErrorCount}</p>
+          </div>
+        </div>
+
+        <div className="mb-3 grid gap-3 xl:grid-cols-[1.35fr_1fr]">
+          <div className="rounded-xl border border-[var(--border)] bg-[#0f1f3a] p-3 text-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#9ec4ef]">Failure Spotlight</p>
+            {latestError ? (
+              <>
+                <p className="mt-2 text-sm font-semibold text-[#ffd4de]">{latestError.message}</p>
+                <p className="mt-1 text-xs text-[#ffc7d3]">{inferIssueHint(latestError.message)}</p>
+                <p className="mt-2 text-xs text-[#a9c2e6]">
+                  Seen {formatRelativeTime(latestError.createdAt)} | {new Date(latestError.createdAt).toLocaleString()}
+                </p>
+                {latestErrorScreenshot ? (
+                  <a href={latestErrorScreenshot} target="_blank" rel="noreferrer" className="mt-2 block">
+                    <img
+                      src={`${latestErrorScreenshot}?t=${encodeURIComponent(latestError.createdAt)}`}
+                      alt="Latest error screenshot"
+                      className="w-full rounded-lg border border-[var(--border)] bg-[#091326]"
+                      loading="lazy"
+                    />
+                  </a>
+                ) : null}
+                {latestErrorTextDetails ? (
+                  <details className="mt-2 rounded-lg border border-[var(--border)] bg-[#0a1528] p-2">
+                    <summary className="cursor-pointer text-xs text-[#9ec4ef]">Show error details</summary>
+                    <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap text-xs leading-6 text-[#cde3ff]">
+                      {latestErrorTextDetails}
+                    </pre>
+                  </details>
+                ) : null}
+              </>
+            ) : (
+              <p className="mt-2 text-sm text-[#a9c2e6]">No error captured in the current log window.</p>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-[var(--border)] bg-[#0f1f3a] p-3 text-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#9ec4ef]">Current Run Snapshot</p>
+            <div className="mt-2 space-y-2">
+              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
+                <p className="text-[#a9c2e6]">Run info logs</p>
+                <p className="font-semibold">{runInfoCount}</p>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
+                <p className="text-[#a9c2e6]">Run success logs</p>
+                <p className="font-semibold">{runSuccessCount}</p>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
+                <p className="text-[#a9c2e6]">Filtered events</p>
+                <p className="font-semibold">{logs.length}</p>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
+                <p className="text-[#a9c2e6]">Feed status</p>
+                <span className={`status-chip ${staleWhileRunning ? "status-stopped" : "status-running"}`}>
+                  {staleWhileRunning ? "Stale" : "Healthy"}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -171,18 +640,75 @@ export default function AutomationPage() {
             />
             Auto-scroll
           </label>
+          <label className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2 text-sm">
+            <input
+              type="checkbox"
+              checked={liveRefresh}
+              onChange={(event) => setLiveRefresh(event.target.checked)}
+            />
+            Live refresh
+          </label>
           <button onClick={clearLogs} className="btn-subtle text-xs text-[#ffc2cc]">
             Clear Logs
           </button>
         </div>
 
-        <p className="mb-2 text-sm font-semibold text-[#b3c9ea]">LIVE LOGS</p>
+        <p className="mb-2 text-sm font-semibold text-[#b3c9ea]">TRACE TIMELINE</p>
+        <div className="mb-4 max-h-[35vh] space-y-2 overflow-auto rounded-xl border border-[var(--border)] bg-[#0a1528] p-3">
+          {logs.length === 0 ? (
+            <p className="text-sm text-[#9eb8dc]">No events match current filters.</p>
+          ) : (
+            logs.slice(-80).map((entry) => {
+              const screenshotUrl = extractScreenshotUrl(entry.details);
+              const detailsText = stripScreenshotReference(entry.details);
+
+              return (
+                <div key={entry.id} className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className={`rounded-full border px-2 py-0.5 font-semibold ${logLevelClass(entry.level)}`}>
+                      {entry.level.toUpperCase()}
+                    </span>
+                    <span className="rounded-full border border-[#426698] bg-[#142a49] px-2 py-0.5 text-[#cae2ff]">
+                      {classifyLogStage(entry.message).toUpperCase()}
+                    </span>
+                    <span className="text-[#8ea7cb]">
+                      {new Date(entry.createdAt).toLocaleTimeString()} ({formatRelativeTime(entry.createdAt)})
+                    </span>
+                  </div>
+                  <p className="mt-1 text-sm text-[#d7e7ff]">{entry.message}</p>
+
+                  {screenshotUrl ? (
+                    <a href={screenshotUrl} target="_blank" rel="noreferrer" className="mt-2 block">
+                      <img
+                        src={`${screenshotUrl}?t=${encodeURIComponent(entry.createdAt)}`}
+                        alt="Automation flow screenshot"
+                        className="w-full rounded-lg border border-[var(--border)] bg-[#091326]"
+                        loading="lazy"
+                      />
+                    </a>
+                  ) : null}
+
+                  {detailsText ? (
+                    <details className="mt-2 rounded border border-[var(--border)] bg-[#091326] p-2">
+                      <summary className="cursor-pointer text-xs text-[#9ec4ef]">Show details</summary>
+                      <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap text-xs leading-6 text-[#cde3ff]">
+                        {detailsText}
+                      </pre>
+                    </details>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <p className="mb-2 text-sm font-semibold text-[#b3c9ea]">RAW TERMINAL VIEW</p>
         <pre
           ref={logRef}
-          className="h-[58vh] overflow-auto rounded-xl border border-[var(--border)] bg-[#0a1528] p-4 text-sm leading-7 text-[#83ceff]"
+          className="h-[36vh] overflow-auto rounded-xl border border-[var(--border)] bg-[#0a1528] p-4 text-sm leading-7 text-[#83ceff]"
           style={autoScroll ? { scrollBehavior: "smooth" } : undefined}
         >
-          {terminalText}
+          {loading ? "Loading automation feed..." : terminalText}
         </pre>
       </div>
     </section>

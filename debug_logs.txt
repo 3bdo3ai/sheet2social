@@ -1,0 +1,98 @@
+0: [INFO] Preparing account Testing Account 1 for group 975914971441541. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+1: [SUCCESS] Account Testing Account 1 authenticated via saved cookies.
+2: [INFO] Account Testing Account 1 connected to proxy 31.58.9.4:6077 (auth user: piddhvst) (public IP check unavailable).
+3: [INFO] Session preflight started for account Testing Account 1. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+4: [INFO] Automation selection ready: 1 account(s), 1 group(s).
+5: [INFO] Automation started. Checking selected accounts, proxies, and saved sessions before posting.
+6: [INFO] Preparing account Testing Account 1 for group 975914971441541. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+7: [SUCCESS] Account Testing Account 1 authenticated via saved cookies.
+8: [INFO] Account Testing Account 1 connected to proxy 31.58.9.4:6077 (auth user: piddhvst) (public IP check unavailable).
+9: [INFO] Automation is stopped. Worker is idle.
+10: [ERROR] [FAILED] Selenium automation failed for account Testing Account 1 | account=Testing Account 1 | groupId=975914971441541 | post=1/15 | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1861:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2036:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2157:7)
+    at async controllerLoop (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2195:21)
+11: [ERROR] Selenium automation CRASHED for account Testing Account 1 in group 975914971441541. | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1861:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2036:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2157:7)
+    at async controllerLoop (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2195:21)
+12: [INFO] [Publish] Looking for 'Create post' button | account=Testing Account 1 | group=975914971441541
+13: [INFO] [Publish] Group page loaded | account=Testing Account 1 | group=975914971441541
+14: [INFO] [Publish] Navigating to group | account=Testing Account 1 | group=975914971441541 | DETAILS: https://facebook.com/groups/975914971441541
+15: [INFO] Starting post publish for account Testing Account 1 in group 975914971441541.
+16: [SUCCESS] Account Testing Account 1 authenticated using saved cookies.
+17: [INFO] Account Testing Account 1 connected via proxy 31.58.9.4:6077 (auth user: piddhvst) (public IP check unavailable).
+18: [INFO] Session preflight started for account Testing Account 1. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+19: [INFO] Automation selection ready: 1 account(s), 1 group(s).
+20: [INFO] Automation started. Checking selected accounts, proxies, and saved sessions before posting.
+21: [INFO] Worker started. Polling every 60 seconds.
+22: [INFO] Worker executed in one-shot mode and is exiting.
+23: [ERROR] [FAILED] Selenium automation failed for account Testing Account 1 | account=Testing Account 1 | groupId=975914971441541 | post=1/15 | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1934:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2109:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2230:7)
+    at async startWorker (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2256:5)
+24: [ERROR] Selenium automation CRASHED for account Testing Account 1 in group 975914971441541. | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1934:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2109:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2230:7)
+    at async startWorker (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2256:5)
+25: [INFO] [Publish] Looking for 'Create post' button | account=Testing Account 1 | group=975914971441541
+26: [INFO] [Publish] Group page loaded | account=Testing Account 1 | group=975914971441541
+27: [INFO] Preparing account Testing Account 1 for group 975914971441541. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+28: [INFO] [Publish] Navigating to group | account=Testing Account 1 | group=975914971441541 | DETAILS: https://facebook.com/groups/975914971441541
+29: [INFO] Starting post publish for account Testing Account 1 in group 975914971441541.
+30: [SUCCESS] Account Testing Account 1 authenticated using saved cookies.
+31: [INFO] Account Testing Account 1 connected via proxy 31.58.9.4:6077 (auth user: piddhvst) (public IP check unavailable).
+32: [ERROR] [FAILED] Selenium automation failed for account Testing Account 1 | account=Testing Account 1 | groupId=975914971441541 | post=1/15 | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1861:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2036:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2157:7)
+    at async controllerLoop (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2195:21)
+33: [ERROR] Selenium automation CRASHED for account Testing Account 1 in group 975914971441541. | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1861:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2036:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2157:7)
+    at async controllerLoop (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2195:21)
+34: [INFO] [Publish] Looking for 'Create post' button | account=Testing Account 1 | group=975914971441541
+35: [INFO] [Publish] Group page loaded | account=Testing Account 1 | group=975914971441541
+36: [INFO] Preparing account Testing Account 1 for group 975914971441541. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+37: [SUCCESS] Account Testing Account 1 authenticated via saved cookies.
+38: [INFO] Account Testing Account 1 connected to proxy 31.58.9.4:6077 (auth user: piddhvst) (public IP check unavailable).
+39: [INFO] [Publish] Navigating to group | account=Testing Account 1 | group=975914971441541 | DETAILS: https://facebook.com/groups/975914971441541
+40: [INFO] Starting post publish for account Testing Account 1 in group 975914971441541.
+41: [SUCCESS] Account Testing Account 1 authenticated using saved cookies.
+42: [INFO] Account Testing Account 1 connected via proxy 31.58.9.4:6077 (auth user: piddhvst) (public IP check unavailable).
+43: [INFO] Session preflight started for account Testing Account 1. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+44: [INFO] Automation selection ready: 1 account(s), 1 group(s).
+45: [INFO] Automation started. Checking selected accounts, proxies, and saved sessions before posting.
+46: [INFO] Worker started. Polling every 60 seconds.
+47: [INFO] Preparing account Testing Account 1 for group 975914971441541. Connection: 31.58.9.4:6077 (auth user: piddhvst). | DETAILS: Saved cookie count: 14
+48: [ERROR] [FAILED] Selenium automation failed for account Testing Account 1 | account=Testing Account 1 | groupId=975914971441541 | post=1/15 | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1861:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2036:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2157:7)
+    at async controllerLoop (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2195:21)
+49: [ERROR] Selenium automation CRASHED for account Testing Account 1 in group 975914971441541. | DETAILS: Error: Timed out waiting for xpaths: //span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')] | //div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'write something')]
+    at waitForFirstVisibleXpath (D:\Job\In Progress\Sheet2Social\worker\engine.ts:700:9)
+    at async publishPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:865:31)
+    at async executeSeleniumPost (D:\Job\In Progress\Sheet2Social\worker\engine.ts:1861:27)
+    at async processGroupPosts (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2036:20)
+    at async runCycle (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2157:7)
+    at async controllerLoop (D:\Job\In Progress\Sheet2Social\worker\engine.ts:2195:21)

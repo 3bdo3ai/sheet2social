@@ -48,3 +48,41 @@ child.on('close', (code, signal) => {
   }
   process.exit(code ?? 1);
 });
+
+// Spawn the background worker if we are running dev or start
+if (args[0] === 'dev' || args[0] === 'start') {
+  const workerVisibleEnv = String(process.env.WORKER_VISIBLE_BROWSER ?? '').trim().toLowerCase();
+  const forceHeadless = workerVisibleEnv === 'false';
+  const forceVisible = workerVisibleEnv === 'true';
+  const useVisibleWorker = forceVisible || (args[0] === 'dev' && !forceHeadless);
+  const workerScript = useVisibleWorker ? 'worker:visible' : 'worker:engine';
+  const workerEnv = { ...process.env };
+
+  if (useVisibleWorker) {
+    if (!workerEnv.WORKER_SKIP_PREFLIGHT_IN_VISIBLE_MODE) {
+      workerEnv.WORKER_SKIP_PREFLIGHT_IN_VISIBLE_MODE = 'true';
+    }
+
+    if (!workerEnv.WORKER_DEBUG_BROWSER_HOLD_FAILURE_ONLY) {
+      workerEnv.WORKER_DEBUG_BROWSER_HOLD_FAILURE_ONLY = 'true';
+    }
+
+    if (!workerEnv.WORKER_DEBUG_BROWSER_HOLD_MS) {
+      workerEnv.WORKER_DEBUG_BROWSER_HOLD_MS = '15000';
+    }
+  }
+
+  console.log(
+    `[worker-launcher] Starting ${workerScript} (${useVisibleWorker ? 'debug Chrome view enabled' : 'headless mode'})`
+  );
+
+  const workerProcess = spawn('npm', ['run', workerScript], {
+    env: workerEnv,
+    stdio: 'inherit',
+    shell: true,
+  });
+
+  workerProcess.on('error', (err) => {
+    console.error(`Failed to start worker process: ${err}`);
+  });
+}

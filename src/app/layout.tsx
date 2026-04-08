@@ -19,7 +19,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" dir="ltr">
+    <html lang="en" dir="ltr" data-scroll-behavior="smooth">
       <body className={`${cairo.variable} antialiased`}>
         {children}
       </body>

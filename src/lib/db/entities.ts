@@ -4,8 +4,12 @@ export interface FbAccount {
   alias?: string;
   username: string;
   password: string;
+  twoFactorSecret?: string;
+  proxyId?: string;
   socks5ProxyHost?: string;
   socks5ProxyPort?: number;
+  socks5ProxyUsername?: string;
+  socks5ProxyPassword?: string;
   postFilter?: "all" | "with-comments" | "without-comments";
   postingMethod?:
     | "post-all-sequential"

@@ -1,0 +1,5 @@
+{
+  "status": 200,
+  "body": "{\"success\":true,\"message\":\"Comment test completed successfully.\",\"details\":\"Matched completed row 7 in group feed and submitted the comment action. | Matched-post screenshot: /automation-trace/1775689314824-comment-test-matched-row-7.png\",\"matchedPostScreenshot\":\"/automation-trace/1775689314824-comment-test-matched-row-7.png\",\"accountId\":\"06962da8-63ce-4f41-977f-6a7970550484\",\"accountName\":\"Testing Account 2\",\"groupId\":\"39d4e70d-9f4e-4066-8f4b-c0e5b2489790\",\"groupLabel\":\"Testing Group 2\",\"rowIndex\":7,\"postText\":\"Inventory is dropping by the second!! ⏳🔥\",\"commentLink\":\"https://mavely.app.link/6LWGGdzBK1b\"}",
+  "at": "2026-04-08T23:01:57.701Z"
+}

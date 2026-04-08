@@ -274,6 +274,8 @@ function inferIssueHint(message: string): string {
 export default function AutomationPage() {
   const [rawLogs, setRawLogs] = useState<LogItem[]>([]);
   const [state, setState] = useState<"running" | "stopped">("stopped");
+  const [pendingState, setPendingState] = useState<"running" | "stopped" | null>(null);
+  const [isStateMutating, setIsStateMutating] = useState(false);
   const [levelFilter, setLevelFilter] = useState<"all" | "info" | "success" | "error">("all");
   const [search, setSearch] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
@@ -282,6 +284,9 @@ export default function AutomationPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement | null>(null);
+  const transitionStartedAtRef = useRef<number>(0);
+
+  const displayState = pendingState ?? state;
 
   const loadData = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
@@ -305,7 +310,9 @@ export default function AutomationPage() {
       const stateData = (await stateRes.json()) as Partial<AutomationStatePayload>;
       const logsData = (await logsRes.json()) as LogItem[];
 
-      setState(stateData.state === "running" ? "running" : "stopped");
+      const remoteState = stateData.state === "running" ? "running" : "stopped";
+      setState(remoteState);
+      setPendingState((current) => (current && current === remoteState ? null : current));
       setRawLogs(Array.isArray(logsData) ? logsData : []);
       setRequestError(null);
     } catch (error) {
@@ -325,13 +332,14 @@ export default function AutomationPage() {
       return;
     }
 
-    const intervalMs = state === "running" ? 2000 : 5000;
+    const isTransitionWindow = Date.now() - transitionStartedAtRef.current < 10_000;
+    const intervalMs = isTransitionWindow ? 750 : displayState === "running" ? 2000 : 2500;
     const timer = setInterval(() => {
       void loadData({ silent: true });
     }, intervalMs);
 
     return () => clearInterval(timer);
-  }, [liveRefresh, loadData, state]);
+  }, [liveRefresh, loadData, displayState]);
 
   const chronologicalLogs = useMemo(() => rawLogs.slice().reverse(), [rawLogs]);
 
@@ -363,7 +371,7 @@ export default function AutomationPage() {
 
   const latestLogEntry = rawLogs[0];
   const staleWhileRunning =
-    state === "running" &&
+    displayState === "running" &&
     latestLogEntry !== undefined &&
     Date.now() - new Date(latestLogEntry.createdAt).getTime() > 120_000;
 
@@ -430,6 +438,17 @@ export default function AutomationPage() {
   }
 
   async function setAutomation(next: "running" | "stopped") {
+    if (isStateMutating || displayState === next) {
+      return;
+    }
+
+    const previousState = state;
+    transitionStartedAtRef.current = Date.now();
+    setIsStateMutating(true);
+    setPendingState(next);
+    setState(next);
+    setRequestError(null);
+
     try {
       const response = await fetch("/api/admin/automation/state", {
         method: "POST",
@@ -441,9 +460,18 @@ export default function AutomationPage() {
         throw new Error("Unable to update automation state");
       }
 
+      const payload = (await response.json()) as Partial<AutomationStatePayload>;
+      const confirmedState = payload.state === "running" ? "running" : "stopped";
+      setState(confirmedState);
+      setPendingState(null);
       await loadData({ silent: true });
     } catch (error) {
+      setState(previousState);
+      setPendingState(null);
       setRequestError(error instanceof Error ? error.message : "Unknown automation-state error");
+      await loadData({ silent: true });
+    } finally {
+      setIsStateMutating(false);
     }
   }
 
@@ -461,12 +489,18 @@ export default function AutomationPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`status-chip ${state === "running" ? "status-running" : "status-stopped"}`}>
-            {state === "running" ? "Running" : "Stopped"}
+          <span className={`status-chip ${displayState === "running" ? "status-running" : "status-stopped"}`}>
+            {isStateMutating
+              ? displayState === "running"
+                ? "Starting..."
+                : "Stopping..."
+              : displayState === "running"
+              ? "Running"
+              : "Stopped"}
           </span>
           <button
             onClick={() => setAutomation("running")}
-            disabled={state === "running"}
+            disabled={isStateMutating || displayState === "running"}
             className="btn-success inline-flex items-center gap-1.5 disabled:opacity-60"
           >
             <PlayIcon className="h-4 w-4" />
@@ -474,7 +508,7 @@ export default function AutomationPage() {
           </button>
           <button
             onClick={() => setAutomation("stopped")}
-            disabled={state === "stopped"}
+            disabled={isStateMutating || displayState === "stopped"}
             className="btn-danger inline-flex items-center gap-1.5 disabled:opacity-60"
           >
             <StopIcon className="h-4 w-4" />

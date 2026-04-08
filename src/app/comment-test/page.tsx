@@ -21,6 +21,7 @@ type CommentTestResponse = {
   message?: string;
   details?: string;
   error?: string;
+  matchedPostScreenshot?: string;
   accountName?: string;
   groupLabel?: string;
   rowIndex?: number;
@@ -42,6 +43,11 @@ type CandidatePreviewResponse = {
   rowIndex: number;
   postText: string;
   commentText: string;
+  debugDetails?: string;
+  screenshot?: string;
+  pageSourcePath?: string;
+  pageTitle?: string;
+  domSummary?: string;
   accountId: string;
   accountName: string;
   groupId: string;
@@ -62,6 +68,7 @@ export default function CommentTestPage() {
   const [rowIndex, setRowIndex] = useState<string>("");
   const [commentLink, setCommentLink] = useState("");
   const [visible, setVisible] = useState(true);
+  const [captureMatchedPostScreenshot, setCaptureMatchedPostScreenshot] = useState(true);
   const [loading, setLoading] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [result, setResult] = useState<CommentTestResponse | null>(null);
@@ -135,6 +142,7 @@ export default function CommentTestPage() {
           rowIndex: rowIndex ? Number.parseInt(rowIndex, 10) : undefined,
           commentLink: commentLink.trim() || undefined,
           visible,
+          captureMatchedPostScreenshot,
           articleIndex: selectedCandidate ? Number.parseInt(selectedCandidate, 10) : undefined,
         }),
       });
@@ -262,6 +270,21 @@ export default function CommentTestPage() {
               </button>
             </label>
 
+            <label className="grid gap-2">
+              <span className="text-sm font-semibold text-[#d8f0f2]">Matched Post Screenshot</span>
+              <button
+                type="button"
+                onClick={() => setCaptureMatchedPostScreenshot((prev) => !prev)}
+                className={`rounded-xl border px-4 py-3 text-left text-sm font-semibold transition ${
+                  captureMatchedPostScreenshot
+                    ? "border-[#4f9fa3] bg-[#0f2b31] text-[#d9ffff]"
+                    : "border-[#325e67] bg-[#07131a] text-[#a8c7cc]"
+                }`}
+              >
+                {captureMatchedPostScreenshot ? "Enabled" : "Disabled"}
+              </button>
+            </label>
+
             <label className="grid gap-2 lg:col-span-2">
               <span className="text-sm font-semibold text-[#d8f0f2]">Comment Text</span>
               <textarea
@@ -311,6 +334,11 @@ export default function CommentTestPage() {
               <p>
                 Row {preview.rowIndex} on {preview.groupLabel} for {preview.accountName}
               </p>
+              {preview.debugDetails ? <p>Diagnostics: {preview.debugDetails}</p> : null}
+              {preview.screenshot ? <p>Screenshot: {preview.screenshot}</p> : null}
+              {preview.pageTitle ? <p>Page Title: {preview.pageTitle}</p> : null}
+              {preview.domSummary ? <p>DOM Summary: {preview.domSummary}</p> : null}
+              {preview.pageSourcePath ? <p>Page Source Dump: {preview.pageSourcePath}</p> : null}
               <p>Choose the card you want the comment test to use, then run the test.</p>
               <div className="grid gap-3">
                 {preview.candidates.length > 0 ? (
@@ -376,6 +404,7 @@ export default function CommentTestPage() {
                 <p>Account: {result.accountName}</p>
                 <p>Group: {result.groupLabel}</p>
                 <p>Row: {result.rowIndex}</p>
+                {result.matchedPostScreenshot ? <p>Screenshot: {result.matchedPostScreenshot}</p> : null}
                 <p>{result.details}</p>
               </div>
             ) : (

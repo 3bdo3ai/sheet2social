@@ -23,6 +23,7 @@ type CommentTestInput = {
   commentLink?: string;
   visible?: boolean;
   articleIndex?: number;
+  captureMatchedPostScreenshot?: boolean;
 };
 
 export type CommentTestCandidate = {
@@ -39,6 +40,11 @@ export type CommentCandidatePreview = {
   rowIndex: number;
   postText: string;
   commentText: string;
+  debugDetails?: string;
+  screenshot?: string;
+  pageSourcePath?: string;
+  pageTitle?: string;
+  domSummary?: string;
   accountId: string;
   accountName: string;
   groupId: string;
@@ -49,6 +55,7 @@ type CommentTestResult = {
   success: boolean;
   message: string;
   details?: string;
+  matchedPostScreenshot?: string;
   accountId: string;
   accountName: string;
   groupId: string;
@@ -68,6 +75,108 @@ interface ProxyTarget {
 
 const STORAGE_DIR = path.join(process.cwd(), "storage");
 const SESSION_STORE_PATH = path.join(STORAGE_DIR, "facebook_sessions.json");
+const COMMENT_TEST_DUMP_DIR = path.join(STORAGE_DIR, "comment-test-dumps");
+const TRACE_PUBLIC_DIR = path.join(process.cwd(), "public", "automation-trace");
+const TRACE_PUBLIC_ROUTE = "/automation-trace";
+
+function sanitizeTraceLabel(value: string): string {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  if (!normalized) {
+    return "trace";
+  }
+
+  return normalized.slice(0, 80);
+}
+
+async function captureTraceScreenshot(driver: WebDriver, label: string): Promise<string | undefined> {
+  try {
+    await fs.mkdir(TRACE_PUBLIC_DIR, { recursive: true });
+    const screenshot = await driver.takeScreenshot();
+    const fileName = `${Date.now()}-${sanitizeTraceLabel(label)}.png`;
+    const filePath = path.join(TRACE_PUBLIC_DIR, fileName);
+    await fs.writeFile(filePath, screenshot, "base64");
+    return `${TRACE_PUBLIC_ROUTE}/${fileName}`;
+  } catch {
+    return undefined;
+  }
+}
+
+async function capturePageSourceDump(driver: WebDriver, label: string): Promise<string | undefined> {
+  try {
+    await fs.mkdir(COMMENT_TEST_DUMP_DIR, { recursive: true });
+    const html = await driver.getPageSource();
+    const fileName = `${Date.now()}-${sanitizeTraceLabel(label)}.html`;
+    const filePath = path.join(COMMENT_TEST_DUMP_DIR, fileName);
+    await fs.writeFile(filePath, html, "utf8");
+    return filePath;
+  } catch {
+    return undefined;
+  }
+}
+
+async function warmUpFeed(driver: WebDriver): Promise<void> {
+  await driver.executeScript("window.scrollTo(0, Math.max(document.body.scrollHeight * 0.35, 400));").catch(() => undefined);
+  await sleep(700);
+  await driver.executeScript("window.scrollTo(0, 0);").catch(() => undefined);
+  await sleep(500);
+}
+
+async function collectFeedDiagnostics(driver: WebDriver): Promise<string> {
+  const stats = await driver.executeScript(() => {
+    const count = (selector: string) => document.querySelectorAll(selector).length;
+    return {
+      article: count("div[role='article']"),
+      storyMessage: count("[data-ad-rendering-role='story_message']"),
+      commentButtonRole: count("[role='button'][aria-label*='comment' i], [role='link'][aria-label*='comment' i]"),
+      commentAdRole: count("[data-ad-rendering-role='comment_button']"),
+      postActions: count("[aria-label='Actions for this post']"),
+      textboxComment: count("div[role='textbox'][contenteditable='true'][aria-label*='comment' i]"),
+    };
+  }).catch(() => undefined) as
+    | {
+        article: number;
+        storyMessage: number;
+        commentButtonRole: number;
+        commentAdRole: number;
+        postActions: number;
+        textboxComment: number;
+      }
+    | undefined;
+
+  const issues: string[] = [];
+  const currentUrl = await driver.getCurrentUrl().catch(() => "unknown");
+  const pageTitle = await driver.getTitle().catch(() => "unknown");
+  const body = await driver.findElement(By.css("body")).catch(() => undefined);
+  const bodyText = body ? normalizeForComparison(await body.getText().catch(() => "")) : "";
+  const articleCount = (await driver.findElements(By.css("div[role='article']")).catch(() => [])).length;
+
+  if (currentUrl.includes("/login") || bodyText.includes("log in") || bodyText.includes("log into facebook")) {
+    issues.push("Possible auth issue: page looks like login flow.");
+  }
+
+  if (bodyText.includes("join group") || bodyText.includes("private group") || bodyText.includes("only members can")) {
+    issues.push("Group access issue: account may not be able to view this group feed.");
+  }
+
+  if (bodyText.includes("temporarily blocked") || bodyText.includes("try again later")) {
+    issues.push("Facebook action limit or temporary block detected in page text.");
+  }
+
+  const domSummary = stats
+    ? `DOM: article=${stats.article}, story_message=${stats.storyMessage}, comment_aria=${stats.commentButtonRole}, comment_ad_role=${stats.commentAdRole}, post_actions=${stats.postActions}, comment_textbox=${stats.textboxComment}`
+    : "DOM: unavailable";
+
+  const detailsParts = [`URL: ${currentUrl}`, `Title: ${pageTitle}`, `Article count: ${articleCount}`, domSummary];
+  if (issues.length > 0) {
+    detailsParts.push(`Signals: ${issues.join(" ")}`);
+  }
+
+  return detailsParts.join(" | ");
+}
 
 function resolveChromedriverPath(): string | undefined {
   const candidatePaths = [
@@ -347,6 +456,44 @@ async function waitForCommentInput(
   throw new Error("Comment input box was not found after opening comments.");
 }
 
+async function getCandidateContainers(
+  driver: WebDriver
+): Promise<Array<Awaited<ReturnType<WebDriver["findElement"]>>>> {
+  const roleArticles = await driver.findElements(By.css("div[role='article']"));
+  if (roleArticles.length > 0) {
+    return roleArticles;
+  }
+
+  const fallbackContainers = await driver.findElements(
+    By.xpath(
+      "//*[@data-ad-rendering-role='story_message']/ancestor::*[.//*[@data-ad-rendering-role='comment_button' or (@aria-label and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment'))]][1]"
+    )
+  );
+
+  return fallbackContainers;
+}
+
+async function resolveContainerFromStoryBlock(
+  block: Awaited<ReturnType<WebDriver["findElement"]>>
+): Promise<Awaited<ReturnType<WebDriver["findElement"]>>> {
+  const roleArticle = await block.findElements(By.xpath("ancestor::div[@role='article'][1]"));
+  if (roleArticle[0]) {
+    return roleArticle[0];
+  }
+
+  const fallback = await block.findElements(
+    By.xpath(
+      "ancestor::*[.//*[@data-ad-rendering-role='comment_button' or (@aria-label and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment'))]][1]"
+    )
+  );
+
+  if (fallback[0]) {
+    return fallback[0];
+  }
+
+  throw new Error("Could not resolve a container for the matched story block.");
+}
+
 async function findMatchingArticle(
   driver: WebDriver,
   expectedText: string
@@ -373,14 +520,14 @@ async function findMatchingArticle(
         continue;
       }
 
-      const article = await block.findElement(By.xpath("ancestor::div[@role='article'][1]"));
+      const article = await resolveContainerFromStoryBlock(block);
       return article;
     } catch {
       // Ignore detached blocks and continue scanning.
     }
   }
 
-  const articles = await driver.findElements(By.css("div[role='article']"));
+  const articles = await getCandidateContainers(driver);
   let bestArticle: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
   let bestScore = 0;
 
@@ -515,7 +662,7 @@ async function scanCommentCandidates(
   driver: WebDriver,
   expectedText: string
 ): Promise<CommentTestCandidate[]> {
-  const articles = await driver.findElements(By.css("div[role='article']"));
+  const articles = await getCandidateContainers(driver);
   const fragments = buildMatchFragments(expectedText);
   const scored: CommentTestCandidate[] = [];
 
@@ -537,7 +684,7 @@ async function chooseMatchedArticle(
   expectedText: string,
   articleIndex?: number
 ): Promise<Awaited<ReturnType<WebDriver["findElement"]>>> {
-  const articles = await driver.findElements(By.css("div[role='article']"));
+  const articles = await getCandidateContainers(driver);
 
   if (typeof articleIndex === "number" && Number.isInteger(articleIndex) && articleIndex >= 0) {
     const selected = articles[articleIndex];
@@ -566,35 +713,40 @@ async function clickCommentButton(
   driver: WebDriver,
   article: Awaited<ReturnType<WebDriver["findElement"]>>
 ): Promise<void> {
-  let commentButtons = await article.findElements(
-    By.xpath(
-      ".//*[@role='button'][contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]"
-    )
+  const selectors = [
+    ".//*[@data-ad-rendering-role='comment_button']/ancestor::*[@role='button' or @role='link'][1]",
+    ".//*[@role='button' or @role='link'][contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'leave a comment') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
+    ".//span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]/ancestor::*[@role='button' or @role='link'][1]",
+    ".//*[@role='button' or @role='link'][contains(normalize-space(.), 'Comment') or contains(normalize-space(.), 'comment') or contains(normalize-space(.), 'تعليق')]",
+  ];
+
+  for (const selector of selectors) {
+    const elements = await article.findElements(By.xpath(selector));
+    for (const element of elements) {
+      try {
+        if (!(await element.isDisplayed())) {
+          continue;
+        }
+
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", element).catch(() => undefined);
+        await element.click().catch(async () => {
+          await driver.executeScript(
+            "arguments[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));",
+            element
+          );
+        });
+        return;
+      } catch {
+        // Try next candidate element.
+      }
+    }
+  }
+
+  const buttonCount = (await article.findElements(By.xpath(".//*[@role='button']"))).length;
+  const linkCount = (await article.findElements(By.xpath(".//*[@role='link']"))).length;
+  throw new Error(
+    `Comment button not found on the matched post. role=button count: ${buttonCount}, role=link count: ${linkCount}.`
   );
-
-  if (commentButtons.length === 0) {
-    commentButtons = await article.findElements(
-      By.xpath(
-        ".//span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]/ancestor::*[@role='button'][1]"
-      )
-    );
-  }
-
-  if (commentButtons.length === 0) {
-    commentButtons = await article.findElements(
-      By.xpath(
-        ".//*[@role='button'][contains(normalize-space(.), 'Comment') or contains(normalize-space(.), 'comment') or contains(normalize-space(.), 'تعليق')]"
-      )
-    );
-  }
-
-  if (commentButtons.length === 0) {
-    throw new Error("Comment button not found on the matched post.");
-  }
-
-  await commentButtons[0].click().catch(async () => {
-    await driver.executeScript("arguments[0].click();", commentButtons[0]);
-  });
 }
 
 async function submitComment(
@@ -604,9 +756,27 @@ async function submitComment(
 ): Promise<void> {
   await clickCommentButton(driver, article);
 
-  const commentInput = await waitForCommentInput(driver, article);
-  await commentInput.click();
-  await commentInput.sendKeys(commentText);
+  let commentInput: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
+
+  for (let attempt = 1; attempt <= 3 && !commentInput; attempt += 1) {
+    try {
+      commentInput = await waitForCommentInput(driver, article);
+      await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", commentInput).catch(() => undefined);
+      await driver.executeScript("arguments[0].focus();", commentInput).catch(() => undefined);
+      await commentInput.sendKeys(commentText);
+    } catch (error) {
+      commentInput = undefined;
+      const message = error instanceof Error ? error.message : "";
+      if (!message.toLowerCase().includes("stale element")) {
+        throw error;
+      }
+      await sleep(250 * attempt);
+    }
+  }
+
+  if (!commentInput) {
+    throw new Error("Comment input box was not found after opening comments.");
+  }
 
   let submitButtons = await driver.findElements(
     By.xpath(
@@ -675,20 +845,63 @@ export async function runCommentTest(input: CommentTestInput): Promise<CommentTe
   const proxyTarget = await resolveAccountProxyTarget(account);
   const sessionCookies = await getStoredSessionCookies(account.id);
   const { driver, cleanup } = await launchBrowser(proxyTarget, input.visible === true, sessionCookies);
+  const shouldCaptureMatchedPostScreenshot = input.captureMatchedPostScreenshot !== false;
 
   try {
     const groupUrl = `https://www.facebook.com/groups/${group.groupId}`;
     await driver.get(groupUrl);
     await driver.wait(until.elementLocated(By.css("body")), 20_000);
     await driver.sleep(5_000);
+    await warmUpFeed(driver);
 
-    const article = await chooseMatchedArticle(driver, targetRow.post_text, input.articleIndex);
-    await submitComment(driver, article, commentText);
+    let article: Awaited<ReturnType<WebDriver["findElement"]>>;
+    try {
+      article = await chooseMatchedArticle(driver, targetRow.post_text, input.articleIndex);
+    } catch (error) {
+      const diagnostics = await collectFeedDiagnostics(driver);
+      const noMatchScreenshot = shouldCaptureMatchedPostScreenshot
+        ? await captureTraceScreenshot(driver, `comment-test-no-match-row-${targetRow.rowIndex}`)
+        : undefined;
+      const pageSourcePath = await capturePageSourceDump(driver, `comment-test-no-match-row-${targetRow.rowIndex}`);
+      const message = error instanceof Error ? error.message : "Could not match the target done post in the group feed.";
+      const details = [
+        message,
+        diagnostics,
+        noMatchScreenshot ? `Screenshot: ${noMatchScreenshot}` : undefined,
+        pageSourcePath ? `Page source dump: ${pageSourcePath}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      throw new Error(details);
+    }
+    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", article).catch(() => undefined);
+
+    const matchedPostScreenshot = shouldCaptureMatchedPostScreenshot
+      ? await captureTraceScreenshot(driver, `comment-test-matched-row-${targetRow.rowIndex}`)
+      : undefined;
+
+    try {
+      await submitComment(driver, article, commentText);
+    } catch (error) {
+      const failedStepScreenshot = shouldCaptureMatchedPostScreenshot
+        ? await captureTraceScreenshot(driver, `comment-test-fail-row-${targetRow.rowIndex}`)
+        : undefined;
+      const message = error instanceof Error ? error.message : "Unknown comment flow error.";
+      throw new Error(
+        failedStepScreenshot ? `${message} | Screenshot: ${failedStepScreenshot}` : message
+      );
+    }
+
+    const detailsParts = [
+      `Matched completed row ${targetRow.rowIndex} in group feed and submitted the comment action.`,
+      matchedPostScreenshot ? `Matched-post screenshot: ${matchedPostScreenshot}` : undefined,
+    ].filter(Boolean);
 
     return {
       success: true,
       message: "Comment test completed successfully.",
-      details: `Matched completed row ${targetRow.rowIndex} in group feed and submitted the comment action.`,
+      details: detailsParts.join(" | "),
+      matchedPostScreenshot,
       accountId: account.id,
       accountName: account.name,
       groupId: group.id,
@@ -746,14 +959,32 @@ export async function inspectCommentCandidates(input: CommentTestInput): Promise
     await driver.get(groupUrl);
     await driver.wait(until.elementLocated(By.css("body")), 20_000);
     await driver.sleep(5_000);
+    await warmUpFeed(driver);
 
     const candidates = await scanCommentCandidates(driver, targetRow.post_text);
+    const diagnostics = await collectFeedDiagnostics(driver);
+    const noCandidatesScreenshot = candidates.length === 0
+      ? await captureTraceScreenshot(driver, `comment-test-no-candidates-row-${targetRow.rowIndex}`)
+      : undefined;
+    const pageSourcePath = candidates.length === 0
+      ? await capturePageSourceDump(driver, `comment-test-no-candidates-row-${targetRow.rowIndex}`)
+      : undefined;
+    const pageTitle = await driver.getTitle().catch(() => undefined);
+
+    const domSummary = diagnostics.includes("DOM:")
+      ? diagnostics.slice(diagnostics.indexOf("DOM:"))
+      : undefined;
 
     return {
       candidates,
       rowIndex: targetRow.rowIndex,
       postText: targetRow.post_text,
       commentText,
+      debugDetails: diagnostics,
+      screenshot: noCandidatesScreenshot,
+      pageSourcePath,
+      pageTitle,
+      domSummary,
       accountId: account.id,
       accountName: account.name,
       groupId: group.id,

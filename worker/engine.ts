@@ -78,6 +78,7 @@ interface PostResult {
   success: boolean;
   message: string;
   details?: string;
+  commentWarning?: string;
 }
 
 interface ProxyConfig {
@@ -117,6 +118,8 @@ type ParquetField = {
 };
 
 const POLL_INTERVAL_MS = 60_000;
+const STOPPED_POLL_INTERVAL_MS = 2_000;
+const STOP_CHECK_INTERVAL_MS = 1_000;
 const ACTION_BLOCK_COOLDOWN_MS =
   Math.max(5, Number.parseInt(process.env.WORKER_ACTION_BLOCK_COOLDOWN_MINUTES ?? "45", 10) || 45) * 60_000;
 const STORAGE_DIR = path.join(process.cwd(), "storage");
@@ -203,6 +206,17 @@ const fbAccountsSchema: Record<string, ParquetField> = {
 let lastObservedAutomationState: StateValue | undefined;
 const readyAccountSessions = new Set<string>();
 const accountCooldownUntil = new Map<string, number>();
+
+class AutomationStopRequestedError extends Error {
+  constructor(message = "Automation stop requested by user.") {
+    super(message);
+    this.name = "AutomationStopRequestedError";
+  }
+}
+
+function isAutomationStopRequestedError(error: unknown): error is AutomationStopRequestedError {
+  return error instanceof AutomationStopRequestedError;
+}
 
 function isActionBlockedMessage(message: string | undefined): boolean {
   const text = normalizeForComparison(message ?? "");
@@ -388,6 +402,28 @@ async function readAutomationConfig(): Promise<AutomationConfig> {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function isAutomationRunning(): Promise<boolean> {
+  const automation = await readAutomationConfig();
+  return automation.state === "running";
+}
+
+async function throwIfAutomationStopped(context: string): Promise<void> {
+  if (!(await isAutomationRunning())) {
+    throw new AutomationStopRequestedError(`Automation stop requested by user (${context}).`);
+  }
+}
+
+async function sleepWithStopCheck(ms: number, context: string): Promise<void> {
+  const deadline = Date.now() + Math.max(0, ms);
+
+  while (Date.now() < deadline) {
+    await throwIfAutomationStopped(context);
+
+    const remaining = deadline - Date.now();
+    await sleep(Math.min(STOP_CHECK_INTERVAL_MS, remaining));
+  }
 }
 
 function buildTempParquetPath(filePath: string): string {
@@ -728,6 +764,213 @@ function toWebDriverSafeText(value: string): {
 function createPostVerificationSnippet(postText: string): string {
   const normalized = normalizeForComparison(postText);
   return normalized.slice(0, Math.min(80, normalized.length));
+}
+
+function buildMatchFragments(value: string): string[] {
+  const normalized = normalizeForComparison(value);
+  const fragments = new Set<string>();
+
+  if (normalized.length > 0) {
+    fragments.add(normalized.slice(0, Math.min(normalized.length, 180)));
+  }
+
+  for (const part of normalized.split(/[\n\r]+|[.!?]+/g)) {
+    const trimmed = part.trim();
+    if (trimmed.length >= 12) {
+      fragments.add(trimmed.slice(0, 180));
+    }
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  for (let size = 4; size <= 8; size += 1) {
+    for (let index = 0; index + size <= words.length; index += Math.max(1, size - 2)) {
+      const fragment = words.slice(index, index + size).join(" ").trim();
+      if (fragment.length >= 12) {
+        fragments.add(fragment.slice(0, 120));
+      }
+    }
+  }
+
+  return [...fragments].slice(0, 24);
+}
+
+async function resolveContainerFromStoryBlock(
+  block: Awaited<ReturnType<WebDriver["findElement"]>>
+): Promise<Awaited<ReturnType<WebDriver["findElement"]>>> {
+  const roleArticle = await block.findElements(By.xpath("ancestor::div[@role='article'][1]"));
+  if (roleArticle[0]) {
+    return roleArticle[0];
+  }
+
+  const fallback = await block.findElements(
+    By.xpath(
+      "ancestor::*[.//*[@data-ad-rendering-role='comment_button' or (@aria-label and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment'))]][1]"
+    )
+  );
+
+  if (fallback[0]) {
+    return fallback[0];
+  }
+
+  throw new Error("Could not resolve a container for the matched story block.");
+}
+
+async function findMatchingArticle(
+  driver: WebDriver,
+  expectedText: string
+): Promise<Awaited<ReturnType<WebDriver["findElement"]>>> {
+  const normalizedExpectedText = normalizeForComparison(expectedText);
+  const fragments = buildMatchFragments(expectedText);
+
+  const storyBlocks = await driver.findElements(By.css("[data-ad-rendering-role='story_message']"));
+  for (const block of storyBlocks.slice(0, 40)) {
+    try {
+      const storyText = normalizeForComparison(await block.getText());
+      if (!storyText) {
+        continue;
+      }
+
+      let matched = storyText.includes(normalizedExpectedText);
+      for (const fragment of fragments) {
+        if (storyText.includes(fragment)) {
+          matched = true;
+          break;
+        }
+      }
+
+      if (!matched) {
+        continue;
+      }
+
+      return await resolveContainerFromStoryBlock(block);
+    } catch {
+      // Ignore detached blocks and continue scanning.
+    }
+  }
+
+  const articles = await getCandidateContainers(driver);
+  let bestArticle: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
+  let bestScore = 0;
+
+  for (const article of articles.slice(0, 40)) {
+    try {
+      const articleText = normalizeForComparison(await article.getText());
+      let score = 0;
+
+      if (articleText.includes(normalizedExpectedText)) {
+        score += 20;
+      }
+
+      for (const fragment of fragments) {
+        if (fragment.length >= 12 && articleText.includes(fragment)) {
+          score += 2;
+        }
+      }
+
+      const storyTextBlocks = await article.findElements(By.css("[data-ad-rendering-role='story_message']"));
+      for (const block of storyTextBlocks.slice(0, 3)) {
+        try {
+          const storyText = normalizeForComparison(await block.getText());
+          if (storyText.includes(normalizedExpectedText)) {
+            score += 20;
+          }
+
+          for (const fragment of fragments) {
+            if (fragment.length >= 12 && storyText.includes(fragment)) {
+              score += 3;
+            }
+          }
+        } catch {
+          // Ignore detached story blocks and continue.
+        }
+      }
+
+      if ((await article.findElements(By.css("[aria-label='Actions for this post']"))).length > 0) {
+        score += 2;
+      }
+
+      if (
+        (await article.findElements(
+          By.xpath(
+            ".//*[@aria-label and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]"
+          )
+        )).length > 0
+      ) {
+        score += 1;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestArticle = article;
+      }
+    } catch {
+      // Ignore detached elements and continue scanning.
+    }
+  }
+
+  if (bestArticle && bestScore >= 4) {
+    return bestArticle;
+  }
+
+  if (bestArticle) {
+    return bestArticle;
+  }
+
+  throw new Error("Could not match the target posted item in the group feed.");
+}
+
+async function getCandidateContainers(
+  driver: WebDriver
+): Promise<Array<Awaited<ReturnType<WebDriver["findElement"]>>>> {
+  const roleArticles = await driver.findElements(By.css("div[role='article']"));
+  if (roleArticles.length > 0) {
+    return roleArticles;
+  }
+
+  return driver.findElements(
+    By.xpath(
+      "//*[@data-ad-rendering-role='story_message']/ancestor::*[.//*[@data-ad-rendering-role='comment_button' or (@aria-label and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment'))]][1]"
+    )
+  );
+}
+
+async function clickFirstVisibleCommentButton(
+  driver: WebDriver,
+  container: Awaited<ReturnType<WebDriver["findElement"]>>,
+  notFoundMessage: string
+): Promise<void> {
+  const selectors = [
+    ".//*[@data-ad-rendering-role='comment_button']/ancestor::*[@role='button' or @role='link'][1]",
+    ".//*[@role='button' or @role='link'][contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'leave a comment') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
+    ".//span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]/ancestor::*[@role='button' or @role='link'][1]",
+    ".//*[@role='button' or @role='link'][contains(normalize-space(.), 'Comment') or contains(normalize-space(.), 'comment') or contains(normalize-space(.), 'تعليق')]",
+  ];
+
+  for (const selector of selectors) {
+    const elements = await container.findElements(By.xpath(selector));
+    for (const element of elements) {
+      try {
+        if (!(await element.isDisplayed())) {
+          continue;
+        }
+
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", element).catch(() => undefined);
+        await element.click().catch(async () => {
+          await driver.executeScript(
+            "arguments[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));",
+            element
+          );
+        });
+        return;
+      } catch {
+        // Try next candidate element.
+      }
+    }
+  }
+
+  const buttonCount = (await container.findElements(By.xpath(".//*[@role='button']"))).length;
+  const linkCount = (await container.findElements(By.xpath(".//*[@role='link']"))).length;
+  throw new Error(`${notFoundMessage} role=button count: ${buttonCount}, role=link count: ${linkCount}.`);
 }
 
 async function detectFacebookActionBlock(driver: WebDriver): Promise<string | undefined> {
@@ -1649,25 +1892,24 @@ export async function publishPost(
         success: true,
         message: `Post submitted successfully for group ${groupId}.`,
         details: details || undefined,
+        commentWarning: undefined,
       };
     }
 
     await log("Locating submitted post in group feed for commenting");
     const expectedSnippet = createPostVerificationSnippet(webDriverPostText.safeText);
     let matchedArticle: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
+    let matchLookupError: string | undefined;
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      await driver.sleep(attempt === 1 ? 1_500 : 3_000);
+      await driver.sleep(attempt === 1 ? 2_000 : 4_000);
       await navigateWithRetry(driver, groupUrl, 2);
       await driver.wait(until.elementLocated(By.css("body")), 20_000);
 
-      const articles = await driver.findElements(By.css("div[role='article']"));
-      for (const article of articles.slice(0, 10)) {
-        const articleText = normalizeForComparison(await article.getText());
-        if (articleText.includes(expectedSnippet)) {
-          matchedArticle = article;
-          break;
-        }
+      try {
+        matchedArticle = await findMatchingArticle(driver, expectedSnippet);
+      } catch (error) {
+        matchLookupError = error instanceof Error ? error.message : String(error ?? "");
       }
 
       if (matchedArticle) {
@@ -1686,44 +1928,15 @@ export async function publishPost(
       }
 
       if (!matchedArticle) {
-        const fallbackArticles = await driver.findElements(By.css("div[role='article']"));
-        if (fallbackArticles.length === 0) {
-          throw new Error("Submitted post was not found quickly in feed for commenting.");
-        }
+        const fallbackMessage = matchLookupError
+          ? `Submitted post was not found in feed for commenting after retries. ${matchLookupError}`
+          : "Submitted post was not found in feed for commenting after retries.";
 
-        matchedArticle = fallbackArticles[0];
-        await log("Submitted post not matched by text, using top feed article as comment fallback");
+        throw new Error(fallbackMessage);
       }
 
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", matchedArticle).catch(() => undefined);
-
-      let commentButtons = await matchedArticle.findElements(
-        By.xpath(
-          ".//*[@role='button'][contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]"
-        )
-      );
-      if (commentButtons.length === 0) {
-        commentButtons = await matchedArticle.findElements(
-          By.xpath(
-            ".//span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]/ancestor::*[@role='button'][1]"
-          )
-        );
-      }
-      if (commentButtons.length === 0) {
-        commentButtons = await matchedArticle.findElements(
-          By.xpath(
-            ".//*[@role='button'][contains(normalize-space(.), 'Comment') or contains(normalize-space(.), 'comment') or contains(normalize-space(.), 'تعليق')]"
-          )
-        );
-      }
-
-      if (commentButtons.length === 0) {
-        throw new Error("Comment button not found on verified post.");
-      }
-
-      await commentButtons[0].click().catch(async () => {
-        await driver.executeScript("arguments[0].click();", commentButtons[0]);
-      });
+      await clickFirstVisibleCommentButton(driver, matchedArticle, "Comment button not found on verified post.");
 
       const inputTimeoutAt = Date.now() + 20_000;
       let commentInput: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
@@ -1771,8 +1984,65 @@ export async function publishPost(
         throw new Error("Comment input box was not found after opening comments.");
       }
 
-      await commentInput.click();
-      await commentInput.sendKeys(postData.comment_link);
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", commentInput).catch(() => undefined);
+          await driver.executeScript("arguments[0].focus();", commentInput).catch(() => undefined);
+          const currentCommentInput = commentInput;
+          if (!currentCommentInput) {
+            throw new Error("Comment input box was not found after opening comments.");
+          }
+
+          await currentCommentInput.sendKeys(postData.comment_link);
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "";
+          if (!message.toLowerCase().includes("stale element") || attempt === 3) {
+            throw error;
+          }
+
+          commentInput = undefined;
+          const retryDeadline = Date.now() + 20_000;
+          while (Date.now() < retryDeadline && !commentInput) {
+            const localCandidates = await matchedArticle.findElements(
+              By.xpath(
+                ".//div[@contenteditable='true' and (@role='textbox' or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment'))]"
+              )
+            );
+
+            for (const candidate of localCandidates) {
+              try {
+                if (await candidate.isDisplayed()) {
+                  commentInput = candidate;
+                  break;
+                }
+              } catch {
+                // Ignore detached element and continue polling.
+              }
+            }
+
+            if (!commentInput) {
+              const globalCandidates = await driver.findElements(
+                By.css("div[role='article'] div[role='textbox'][contenteditable='true'], form div[role='textbox'][contenteditable='true']")
+              );
+              for (const candidate of globalCandidates) {
+                try {
+                  if (await candidate.isDisplayed()) {
+                    commentInput = candidate;
+                    break;
+                  }
+                } catch {
+                  // Ignore detached element and continue polling.
+                }
+              }
+            }
+
+            if (!commentInput) {
+              await driver.sleep(250);
+            }
+          }
+        }
+      }
 
       let submitButtons = await driver.findElements(
         By.xpath(
@@ -1792,7 +2062,12 @@ export async function publishPost(
           await driver.executeScript("arguments[0].click();", submitButtons[0]);
         });
       } else {
-        await commentInput.sendKeys("\n");
+        const currentCommentInput = commentInput;
+        if (!currentCommentInput) {
+          throw new Error("Comment input box was not found after opening comments.");
+        }
+
+        await currentCommentInput.sendKeys("\n");
       }
 
       await driver.sleep(800);
@@ -1819,6 +2094,7 @@ export async function publishPost(
         ? `Post submitted for group ${groupId}, but comment could not be added.`
         : `Post submitted and comment added for group ${groupId}.`,
       details: details || undefined,
+      commentWarning,
     };
   } finally {
     if (downloadedImagePath) {
@@ -2571,6 +2847,8 @@ async function executeSeleniumPost(
   );
 
   try {
+    await throwIfAutomationStopped("before browser automation starts");
+
     if (proxyConfig) {
       const proxyPublicIp = await detectActivePublicIp(driver);
       await appendLog({
@@ -2633,6 +2911,7 @@ async function executeSeleniumPost(
 
     // Create a step logger that prefixes with account/group info
     const stepLogger: StepLogger = async (step, detail) => {
+      await throwIfAutomationStopped(`during publish step: ${step}`);
       await appendLog({
         level: "info",
         message: `[Publish] ${step} | account=${account.name} | group=${group.groupId}`,
@@ -2664,6 +2943,10 @@ async function executeSeleniumPost(
       };
     }
 
+    if (publishResult.commentWarning) {
+      shouldHoldBrowser = true;
+    }
+
     await appendLog({
       level: "success",
       message: `Account ${account.name} has POSTED successfully to group ${group.groupId}.`,
@@ -2678,6 +2961,22 @@ async function executeSeleniumPost(
       details: publishResult.details,
     };
   } catch (error) {
+    if (isAutomationStopRequestedError(error)) {
+      await appendLog({
+        level: "info",
+        message: `Automation stop requested while processing account ${account.name} in group ${group.groupId}.`,
+        accountId: account.id,
+        groupId: group.id,
+        details: error.message,
+      });
+
+      return {
+        success: false,
+        message: "Automation stop requested by user.",
+        details: error.message,
+      };
+    }
+
     shouldHoldBrowser = true;
     const details = error instanceof Error ? (error.stack ?? error.message) : "Unknown Selenium error";
     await appendLog({
@@ -2832,6 +3131,16 @@ async function processGroupPosts(
   const postCooldownMs = settings.waitIntervalMinutes * 60_000;
 
   for (let postCounter = 0; postCounter < settings.postsPerGroup; postCounter += 1) {
+    if (!(await isAutomationRunning())) {
+      await appendLog({
+        level: "info",
+        message: `Automation stop requested. Exiting group loop for ${group.groupId}.`,
+        accountId: account.id,
+        groupId: group.id,
+      });
+      break;
+    }
+
     const pending = await fetchNextPost(group.csvPath);
     if (!pending) {
       await appendLog({
@@ -2844,6 +3153,16 @@ async function processGroupPosts(
     }
 
     const result = await executeSeleniumPost(account, group, pending.row);
+    if (result.message === "Automation stop requested by user.") {
+      await appendLog({
+        level: "info",
+        message: `Automation stop requested. Ending current cycle for group ${group.groupId}.`,
+        accountId: account.id,
+        groupId: group.id,
+      });
+      break;
+    }
+
     if (result.success) {
       await markPostAsDone(group.csvPath, pending.rowIndex);
       await appendLog({
@@ -2880,7 +3199,7 @@ async function processGroupPosts(
     }
 
     if (postCounter < settings.postsPerGroup - 1) {
-      await sleep(postCooldownMs);
+      await sleepWithStopCheck(postCooldownMs, `between posts in group ${group.groupId}`);
     }
   }
 }
@@ -2897,7 +3216,7 @@ async function runCycle(): Promise<number> {
 
     readyAccountSessions.clear();
     lastObservedAutomationState = "stopped";
-    return POLL_INTERVAL_MS;
+    return STOPPED_POLL_INTERVAL_MS;
   }
 
   const isFreshAutomationStart = lastObservedAutomationState !== "running";
@@ -2921,7 +3240,7 @@ async function runCycle(): Promise<number> {
       level: "info",
       message: "No active accounts or groups found for automation.",
     });
-    return POLL_INTERVAL_MS;
+    return STOPPED_POLL_INTERVAL_MS;
   }
 
   const selectedAccountsById = new Map<string, FbAccountRecord>();
@@ -2961,7 +3280,9 @@ async function runCycle(): Promise<number> {
       message: "All selected accounts are in temporary cooldown due to Facebook limits. Waiting for cooldown expiry.",
     });
 
-    return Number.isFinite(soonestMs) ? Math.max(10_000, Math.min(POLL_INTERVAL_MS, soonestMs)) : POLL_INTERVAL_MS;
+    return Number.isFinite(soonestMs)
+      ? Math.max(STOPPED_POLL_INTERVAL_MS, Math.min(POLL_INTERVAL_MS, soonestMs))
+      : STOPPED_POLL_INTERVAL_MS;
   }
 
   if (isFreshAutomationStart) {
@@ -3004,13 +3325,21 @@ async function runCycle(): Promise<number> {
       level: "error",
       message: "No selected account passed session preflight. Posting cycle aborted.",
     });
-    return POLL_INTERVAL_MS;
+    return STOPPED_POLL_INTERVAL_MS;
   }
 
   const accountSwitchDelayMs =
     automation.settings.delayBetweenAccountsMinutes * 60_000;
 
   for (let index = 0; index < activeGroups.length; index += 1) {
+    if (!(await isAutomationRunning())) {
+      await appendLog({
+        level: "info",
+        message: "Automation stop requested. Ending current worker cycle.",
+      });
+      break;
+    }
+
     const group = activeGroups[index];
     const account = getMappedAccountForGroup(group, activeAccounts, index);
 
@@ -3062,7 +3391,7 @@ async function runCycle(): Promise<number> {
     }
 
     if (index < activeGroups.length - 1) {
-      await sleep(accountSwitchDelayMs);
+      await sleepWithStopCheck(accountSwitchDelayMs, "between groups");
     }
   }
 

@@ -12,6 +12,7 @@ export async function POST(request: Request) {
       rowIndex?: number;
       commentLink?: string;
       visible?: boolean;
+      captureMatchedPostScreenshot?: boolean;
       mode?: "run" | "inspect";
       articleIndex?: number;
     };
@@ -41,6 +42,7 @@ export async function POST(request: Request) {
       rowIndex: Number.isInteger(payload.rowIndex) ? payload.rowIndex : undefined,
       commentLink: payload.commentLink?.trim() || undefined,
       visible: payload.visible === true,
+      captureMatchedPostScreenshot: payload.captureMatchedPostScreenshot !== false,
       articleIndex: Number.isInteger(payload.articleIndex) ? payload.articleIndex : undefined,
     });
 

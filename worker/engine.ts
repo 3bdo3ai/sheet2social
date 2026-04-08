@@ -3227,6 +3227,11 @@ async function runCycle(): Promise<number> {
       level: "info",
       message: "Automation started. Checking selected accounts, proxies, and saved sessions before posting.",
     });
+
+    await appendLog({
+      level: "info",
+      message: `Effective settings: parallelAccounts=${automation.settings.parallelAccounts}, waitIntervalMinutes=${automation.settings.waitIntervalMinutes}, delayBetweenAccountsMinutes=${automation.settings.delayBetweenAccountsMinutes}, postsPerGroup=${automation.settings.postsPerGroup}, commentWithPostImage=${automation.settings.commentWithPostImage}, proxyRotationEnabled=${automation.settings.proxyRotationEnabled}.`,
+    });
   }
 
   const accounts = await readParquetRows<FbAccountRecord>(FB_ACCOUNTS_PARQUET_PATH);
@@ -3254,6 +3259,8 @@ async function runCycle(): Promise<number> {
   const availableSelectedAccounts = selectedAccounts.filter(
     (account) => getAccountCooldownRemainingMs(account.id) === 0
   );
+  const maxParallelAccounts = Math.max(1, automation.settings.parallelAccounts);
+  const activeCycleAccounts = availableSelectedAccounts.slice(0, maxParallelAccounts);
 
   for (const account of selectedAccounts) {
     const remainingMs = getAccountCooldownRemainingMs(account.id);
@@ -3268,7 +3275,7 @@ async function runCycle(): Promise<number> {
     }
   }
 
-  if (availableSelectedAccounts.length === 0) {
+  if (activeCycleAccounts.length === 0) {
     const soonestMs = Math.min(
       ...selectedAccounts
         .map((account) => getAccountCooldownRemainingMs(account.id))
@@ -3288,12 +3295,19 @@ async function runCycle(): Promise<number> {
   if (isFreshAutomationStart) {
     await appendLog({
       level: "info",
-      message: `Automation selection ready: ${availableSelectedAccounts.length}/${selectedAccounts.length} account(s) available, ${activeGroups.length} group(s).`,
+      message: `Automation selection ready: ${activeCycleAccounts.length}/${selectedAccounts.length} account(s) active this cycle (limit=${maxParallelAccounts}), ${activeGroups.length} group(s).`,
+    });
+  }
+
+  if (availableSelectedAccounts.length > activeCycleAccounts.length) {
+    await appendLog({
+      level: "info",
+      message: `parallelAccounts limit applied: processing ${activeCycleAccounts.length} account(s) this cycle, ${availableSelectedAccounts.length - activeCycleAccounts.length} queued for later cycles.`,
     });
   }
 
   if (SKIP_PREFLIGHT_IN_VISIBLE_MODE) {
-    for (const account of availableSelectedAccounts) {
+    for (const account of activeCycleAccounts) {
       readyAccountSessions.add(account.id);
     }
 
@@ -3305,7 +3319,7 @@ async function runCycle(): Promise<number> {
       });
     }
   } else {
-    for (const account of availableSelectedAccounts) {
+    for (const account of activeCycleAccounts) {
       if (readyAccountSessions.has(account.id)) {
         continue;
       }
@@ -3319,7 +3333,7 @@ async function runCycle(): Promise<number> {
     }
   }
 
-  const readySelectedCount = availableSelectedAccounts.filter((account) => readyAccountSessions.has(account.id)).length;
+  const readySelectedCount = activeCycleAccounts.filter((account) => readyAccountSessions.has(account.id)).length;
   if (readySelectedCount === 0) {
     await appendLog({
       level: "error",
@@ -3327,6 +3341,8 @@ async function runCycle(): Promise<number> {
     });
     return STOPPED_POLL_INTERVAL_MS;
   }
+
+  const activeCycleAccountIds = new Set(activeCycleAccounts.map((account) => account.id));
 
   const accountSwitchDelayMs =
     automation.settings.delayBetweenAccountsMinutes * 60_000;
@@ -3342,6 +3358,10 @@ async function runCycle(): Promise<number> {
 
     const group = activeGroups[index];
     const account = getMappedAccountForGroup(group, activeAccounts, index);
+
+    if (!activeCycleAccountIds.has(account.id)) {
+      continue;
+    }
 
     const dashboardEnabled = await isAccountEnabledInDashboard(account.id).catch(() => false);
     if (!dashboardEnabled) {
@@ -3395,7 +3415,7 @@ async function runCycle(): Promise<number> {
     }
   }
 
-  return 10_000;
+  return Math.max(10_000, automation.settings.waitIntervalMinutes * 60_000);
 }
 
 async function startWorker(): Promise<void> {

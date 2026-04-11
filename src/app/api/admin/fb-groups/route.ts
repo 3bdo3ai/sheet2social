@@ -19,6 +19,29 @@ export const runtime = "nodejs";
 
 const CSV_DIRECTORY = path.join(process.cwd(), "data", "csvs");
 
+function normalizeAssignedAccountIds(input: unknown): string[] {
+  if (Array.isArray(input)) {
+    return input
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean);
+  }
+
+  const raw = String(input ?? "").trim();
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function buildAssignedAccountStorageValue(accountIds: string[]): string | undefined {
+  const unique = Array.from(new Set(accountIds.filter(Boolean)));
+  return unique.length > 0 ? unique.join(",") : undefined;
+}
+
 function resolveGroupCsvAbsolutePath(csvPathValue: string): string {
   // Keep deletes scoped to the known CSV directory to avoid wide output tracing.
   return path.join(CSV_DIRECTORY, path.basename(csvPathValue));
@@ -27,7 +50,16 @@ function resolveGroupCsvAbsolutePath(csvPathValue: string): string {
 export async function GET() {
   await initializeDbStorage();
   const records = await readParquetRecords("fbGroups");
-  return NextResponse.json(records);
+  const normalized = records.map((record) => {
+    const accountIds = normalizeAssignedAccountIds((record as FbGroup & { fbAccountIds?: unknown }).fbAccountIds ?? record.fbAccountId);
+    return {
+      ...record,
+      fbAccountId: accountIds[0],
+      fbAccountIds: accountIds,
+    };
+  });
+
+  return NextResponse.json(normalized);
 }
 
 export async function POST(request: Request) {
@@ -68,10 +100,11 @@ export async function POST(request: Request) {
         continue;
       }
 
-      const fbAccountId = row.fb_account_id.trim();
-      if (fbAccountId && !existingAccountIds.has(fbAccountId)) {
+      const parsedIds = normalizeAssignedAccountIds(row.fb_account_id);
+      const invalidAccountId = parsedIds.find((accountId) => !existingAccountIds.has(accountId));
+      if (invalidAccountId) {
         return NextResponse.json(
-          { error: `Invalid fb_account_id: ${fbAccountId}` },
+          { error: `Invalid fb_account_id: ${invalidAccountId}` },
           { status: 400 }
         );
       }
@@ -85,7 +118,7 @@ export async function POST(request: Request) {
         groupId,
         name: row.name.trim() || undefined,
         csvPath: path.join("data", "csvs", csvFileName).replace(/\\/g, "/"),
-        fbAccountId: fbAccountId || undefined,
+        fbAccountId: buildAssignedAccountStorageValue(parsedIds),
         isActive: parseBooleanCsvValue(row.is_active, true),
         createdAt: now,
         updatedAt: now,
@@ -104,7 +137,9 @@ export async function POST(request: Request) {
 
   const groupId = String(formData.get("groupId") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
-  const fbAccountId = String(formData.get("fbAccountId") ?? "").trim();
+  const fbAccountIds = normalizeAssignedAccountIds(formData.getAll("fbAccountIds"));
+  const legacyAccountId = String(formData.get("fbAccountId") ?? "").trim();
+  const assignedAccountIds = fbAccountIds.length > 0 ? fbAccountIds : normalizeAssignedAccountIds(legacyAccountId);
   const file = formData.get("csv");
 
   if (!groupId) {
@@ -116,6 +151,13 @@ export async function POST(request: Request) {
 
   if (file instanceof File && !file.name.toLowerCase().endsWith(".csv")) {
     return NextResponse.json({ error: "Only .csv files are allowed" }, { status: 400 });
+  }
+
+  const existingAccounts = await readParquetRecords("fbAccounts");
+  const existingAccountIds = new Set(existingAccounts.map((item) => item.id));
+  const invalidAccountId = assignedAccountIds.find((accountId) => !existingAccountIds.has(accountId));
+  if (invalidAccountId) {
+    return NextResponse.json({ error: `Invalid account assignment: ${invalidAccountId}` }, { status: 400 });
   }
 
   await fs.mkdir(CSV_DIRECTORY, { recursive: true });
@@ -136,7 +178,7 @@ export async function POST(request: Request) {
     groupId,
     name: name || undefined,
     csvPath: relativeCsvPath,
-    fbAccountId: fbAccountId || undefined,
+    fbAccountId: buildAssignedAccountStorageValue(assignedAccountIds),
     isActive: true,
     createdAt: now,
     updatedAt: now,
@@ -149,7 +191,10 @@ export async function POST(request: Request) {
 export async function PUT(request: Request) {
   await initializeDbStorage();
 
-  const payload = (await request.json()) as Partial<FbGroup> & { id?: string };
+  const payload = (await request.json()) as Partial<FbGroup> & {
+    id?: string;
+    fbAccountIds?: string[];
+  };
   const id = payload.id?.trim();
 
   if (!id) {
@@ -162,17 +207,36 @@ export async function PUT(request: Request) {
     return NextResponse.json({ error: "Group not found" }, { status: 404 });
   }
 
+  const existingAccounts = await readParquetRecords("fbAccounts");
+  const existingAccountIds = new Set(existingAccounts.map((item) => item.id));
+
+  const assignedAccountIds =
+    payload.fbAccountIds !== undefined
+      ? normalizeAssignedAccountIds(payload.fbAccountIds)
+      : payload.fbAccountId !== undefined
+        ? normalizeAssignedAccountIds(payload.fbAccountId)
+        : normalizeAssignedAccountIds(current[index].fbAccountId);
+
+  const invalidAccountId = assignedAccountIds.find((accountId) => !existingAccountIds.has(accountId));
+  if (invalidAccountId) {
+    return NextResponse.json({ error: `Invalid account assignment: ${invalidAccountId}` }, { status: 400 });
+  }
+
   const updated: FbGroup = {
     ...current[index],
     name: payload.name ?? current[index].name,
-    fbAccountId: payload.fbAccountId ?? current[index].fbAccountId,
+    fbAccountId: buildAssignedAccountStorageValue(assignedAccountIds),
     isActive: payload.isActive ?? current[index].isActive,
     updatedAt: new Date().toISOString(),
   };
 
   current[index] = updated;
   await writeParquetRecords("fbGroups", current);
-  return NextResponse.json(updated);
+  return NextResponse.json({
+    ...updated,
+    fbAccountId: assignedAccountIds[0],
+    fbAccountIds: assignedAccountIds,
+  });
 }
 
 export async function DELETE(request: Request) {

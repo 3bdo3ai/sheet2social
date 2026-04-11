@@ -18,6 +18,10 @@ export interface FbAccount {
     | "random-no-repeat"
     | "progressive";
   isActive: boolean;
+  disabledAt?: string;
+  disabledUntil?: string;
+  disabledReason?: string;
+  disabledType?: "manual" | "automatic";
   createdAt: string;
   updatedAt: string;
 }

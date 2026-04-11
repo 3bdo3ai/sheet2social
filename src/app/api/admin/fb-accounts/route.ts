@@ -125,6 +125,10 @@ export async function POST(request: Request) {
         postFilter: postFilter as FbAccount["postFilter"],
         postingMethod: postingMethod as FbAccount["postingMethod"],
         isActive: parseBooleanCsvValue(row.is_active, true),
+        disabledAt: undefined,
+        disabledUntil: undefined,
+        disabledReason: undefined,
+        disabledType: undefined,
         createdAt: now,
         updatedAt: now,
       });
@@ -227,6 +231,10 @@ export async function POST(request: Request) {
     postFilter: "all",
     postingMethod: "post-all-sequential",
     isActive: true,
+    disabledAt: undefined,
+    disabledUntil: undefined,
+    disabledReason: undefined,
+    disabledType: undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -344,6 +352,25 @@ export async function PUT(request: Request) {
       : current[index].socks5ProxyPort,
     socks5ProxyUsername: payload.socks5ProxyUsername !== undefined ? payload.socks5ProxyUsername.trim() || undefined : current[index].socks5ProxyUsername,
     socks5ProxyPassword: payload.socks5ProxyPassword !== undefined ? payload.socks5ProxyPassword.trim() || undefined : current[index].socks5ProxyPassword,
+    disabledAt:
+      payload.isActive === true
+        ? undefined
+        : payload.isActive === false && current[index].isActive === true
+          ? new Date().toISOString()
+          : current[index].disabledAt,
+    disabledUntil: payload.isActive === true ? undefined : current[index].disabledUntil,
+    disabledReason:
+      payload.isActive === true
+        ? undefined
+        : payload.isActive === false && current[index].isActive === true
+          ? "Disabled from dashboard"
+          : current[index].disabledReason,
+    disabledType:
+      payload.isActive === true
+        ? undefined
+        : payload.isActive === false && current[index].isActive === true
+          ? "manual"
+          : current[index].disabledType,
     updatedAt: new Date().toISOString(),
   };
 

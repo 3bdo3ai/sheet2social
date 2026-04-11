@@ -7,6 +7,8 @@ type Settings = {
   waitIntervalMinutes: number;
   delayBetweenAccountsMinutes: number;
   postsPerGroup: number;
+  maxPostsPerAccountPerCycle: number;
+  postsPerSession: number;
   commentWithPostImage: boolean;
   proxyRotationEnabled: boolean;
 };
@@ -23,6 +25,8 @@ const defaultSettings: Settings = {
   waitIntervalMinutes: 60,
   delayBetweenAccountsMinutes: 1,
   postsPerGroup: 15,
+  maxPostsPerAccountPerCycle: 15,
+  postsPerSession: 20,
   commentWithPostImage: false,
   proxyRotationEnabled: false,
 };
@@ -34,8 +38,18 @@ export default function SettingsPage() {
 
   async function loadSettings() {
     const res = await fetch("/api/admin/settings");
-    const data = (await res.json()) as Settings;
-    setSettings(data);
+    const data = (await res.json()) as Partial<Settings>;
+    const parallelAccounts = Number(data.parallelAccounts ?? defaultSettings.parallelAccounts);
+    const maxPostsPerAccountPerCycle = Number(
+      data.maxPostsPerAccountPerCycle ?? defaultSettings.maxPostsPerAccountPerCycle
+    );
+    const fallbackPostsPerSession = Math.max(1, parallelAccounts * maxPostsPerAccountPerCycle);
+
+    setSettings({
+      ...defaultSettings,
+      ...data,
+      postsPerSession: Math.max(1, Math.floor(Number(data.postsPerSession ?? fallbackPostsPerSession))),
+    });
   }
 
   useEffect(() => {
@@ -64,7 +78,10 @@ export default function SettingsPage() {
 
   const cycleMinutes = Math.max(1, settings.waitIntervalMinutes);
   const cyclesPerDay = Math.floor((24 * 60) / cycleMinutes);
-  const estimatedPostsPerCycle = settings.parallelAccounts * settings.postsPerGroup;
+  const maxPostsByAccountWindow =
+    settings.parallelAccounts * Math.min(settings.postsPerGroup, settings.maxPostsPerAccountPerCycle);
+  const estimatedPostsPerCycle =
+    Math.min(settings.postsPerSession, maxPostsByAccountWindow);
   const estimatedDailyCapacity = estimatedPostsPerCycle * cyclesPerDay;
   const queueCoverage = stats?.totalPosts
     ? Math.max(0, Math.round((estimatedDailyCapacity / stats.totalPosts) * 100))
@@ -103,6 +120,15 @@ export default function SettingsPage() {
             Delay between accounts: {settings.delayBetweenAccountsMinutes} minute(s).
           </p>
           <p className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
+            Session post cap: {settings.postsPerSession} post(s) before waiting.
+          </p>
+          <p className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
+            Max posts per account each cycle: {settings.maxPostsPerAccountPerCycle}.
+          </p>
+          <p className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
+            Session cooldown: {settings.waitIntervalMinutes} minute(s) between cycles.
+          </p>
+          <p className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
             Comment image mode: {settings.commentWithPostImage ? "enabled" : "disabled"}.
           </p>
         </div>
@@ -116,7 +142,10 @@ export default function SettingsPage() {
           <input type="number" min={1} value={settings.parallelAccounts} onChange={(event) => setSettings((prev) => ({ ...prev, parallelAccounts: Number(event.target.value || 1) }))} className="modal-input" />
         </Field>
 
-        <Field label="Wait Interval (minutes)" hint="Minutes to wait between automation cycles">
+        <Field
+          label="Session Cooldown (minutes)"
+          hint="Minutes to wait after each posting session before resuming (example: 120 = every 2 hours)"
+        >
           <input type="number" min={1} value={settings.waitIntervalMinutes} onChange={(event) => setSettings((prev) => ({ ...prev, waitIntervalMinutes: Number(event.target.value || 1) }))} className="modal-input" />
         </Field>
 
@@ -126,6 +155,42 @@ export default function SettingsPage() {
 
         <Field label="Posts Per Group" hint="Number of posts to make in each group">
           <input type="number" min={1} value={settings.postsPerGroup} onChange={(event) => setSettings((prev) => ({ ...prev, postsPerGroup: Number(event.target.value || 1) }))} className="modal-input" />
+        </Field>
+
+        <Field
+          label="Max Posts Per Account (per cycle)"
+          hint="Maximum posts one account can publish in a single automation cycle before switching to another account"
+        >
+          <input
+            type="number"
+            min={1}
+            value={settings.maxPostsPerAccountPerCycle}
+            onChange={(event) =>
+              setSettings((prev) => ({
+                ...prev,
+                maxPostsPerAccountPerCycle: Number(event.target.value || 1),
+              }))
+            }
+            className="modal-input"
+          />
+        </Field>
+
+        <Field
+          label="Posts Per Session"
+          hint="Total posts to publish across all active accounts in one session before cooldown starts"
+        >
+          <input
+            type="number"
+            min={1}
+            value={settings.postsPerSession}
+            onChange={(event) =>
+              setSettings((prev) => ({
+                ...prev,
+                postsPerSession: Number(event.target.value || 1),
+              }))
+            }
+            className="modal-input"
+          />
         </Field>
 
         <label className="app-card flex items-center gap-2 px-4 py-4">

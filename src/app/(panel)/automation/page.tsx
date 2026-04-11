@@ -19,6 +19,22 @@ type LogItem = {
 type AutomationStatePayload = {
   state: "running" | "stopped";
   updatedAt?: string;
+  settings?: {
+    parallelAccounts?: number;
+    waitIntervalMinutes?: number;
+    maxPostsPerAccountPerCycle?: number;
+    postsPerSession?: number;
+  };
+};
+
+type AccountSummary = {
+  id: string;
+  name: string;
+  isActive: boolean;
+  disabledAt?: string;
+  disabledUntil?: string;
+  disabledReason?: string;
+  disabledType?: "manual" | "automatic";
 };
 
 type FlowStageId =
@@ -271,8 +287,24 @@ function inferIssueHint(message: string): string {
   return "Use the latest trace entries to locate the first failure and investigate details payload for root cause.";
 }
 
+function toPositiveInt(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.floor(parsed);
+}
+
 export default function AutomationPage() {
   const [rawLogs, setRawLogs] = useState<LogItem[]>([]);
+  const [accounts, setAccounts] = useState<AccountSummary[]>([]);
+  const [runtimeSettings, setRuntimeSettings] = useState<{
+    parallelAccounts: number;
+    waitIntervalMinutes: number;
+    maxPostsPerAccountPerCycle: number;
+    postsPerSession: number;
+  } | null>(null);
   const [state, setState] = useState<"running" | "stopped">("stopped");
   const [pendingState, setPendingState] = useState<"running" | "stopped" | null>(null);
   const [isStateMutating, setIsStateMutating] = useState(false);
@@ -298,9 +330,10 @@ export default function AutomationPage() {
     setIsRefreshing(true);
 
     try {
-      const [stateRes, logsRes] = await Promise.all([
+      const [stateRes, logsRes, accountsRes] = await Promise.all([
         fetch("/api/admin/automation/state", { cache: "no-store" }),
         fetch("/api/admin/logs?limit=280", { cache: "no-store" }),
+        fetch("/api/admin/fb-accounts", { cache: "no-store" }),
       ]);
 
       if (!stateRes.ok || !logsRes.ok) {
@@ -309,11 +342,35 @@ export default function AutomationPage() {
 
       const stateData = (await stateRes.json()) as Partial<AutomationStatePayload>;
       const logsData = (await logsRes.json()) as LogItem[];
+      const accountsData = (await accountsRes.json()) as AccountSummary[];
 
       const remoteState = stateData.state === "running" ? "running" : "stopped";
       setState(remoteState);
       setPendingState((current) => (current && current === remoteState ? null : current));
       setRawLogs(Array.isArray(logsData) ? logsData : []);
+      setAccounts(Array.isArray(accountsData) ? accountsData : []);
+
+      const incomingSettings = stateData.settings;
+      if (incomingSettings && typeof incomingSettings === "object") {
+        const parallelAccounts = toPositiveInt(incomingSettings.parallelAccounts, 1);
+        const maxPostsPerAccountPerCycle = toPositiveInt(
+          incomingSettings.maxPostsPerAccountPerCycle,
+          1
+        );
+
+        setRuntimeSettings({
+          parallelAccounts,
+          waitIntervalMinutes: toPositiveInt(incomingSettings.waitIntervalMinutes, 1),
+          maxPostsPerAccountPerCycle,
+          postsPerSession: toPositiveInt(
+            incomingSettings.postsPerSession,
+            parallelAccounts * maxPostsPerAccountPerCycle
+          ),
+        });
+      } else {
+        setRuntimeSettings(null);
+      }
+
       setRequestError(null);
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : "Unknown fetch error");
@@ -398,6 +455,26 @@ export default function AutomationPage() {
   const runInfoCount = runLogs.filter((entry) => entry.level === "info").length;
   const runSuccessCount = runLogs.filter((entry) => entry.level === "success").length;
   const runErrorCount = runLogs.filter((entry) => entry.level === "error").length;
+
+  const pausedAccounts = useMemo(
+    () =>
+      accounts
+        .filter(
+          (account) => !account.isActive && account.disabledType === "automatic" && account.disabledUntil
+        )
+        .sort(
+          (left, right) =>
+            new Date(left.disabledUntil!).getTime() - new Date(right.disabledUntil!).getTime()
+        ),
+    [accounts]
+  );
+
+  const nextResumeAccount = pausedAccounts[0];
+  const nextResumeLabel = nextResumeAccount
+    ? new Date(nextResumeAccount.disabledUntil!).getTime() > Date.now()
+      ? new Date(nextResumeAccount.disabledUntil!).toLocaleString()
+      : "resume due now"
+    : undefined;
 
   const terminalText = useMemo(
     () =>
@@ -530,6 +607,20 @@ export default function AutomationPage() {
         </div>
       ) : null}
 
+      {runtimeSettings ? (
+        <div className="app-card p-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#9ec4ef]">Session Runtime Config</p>
+          <p className="mt-2 text-sm text-[#d4e6ff]">
+            Worker will publish up to <span className="font-semibold">{runtimeSettings.postsPerSession}</span> post(s)
+            per session, then cool down for <span className="font-semibold">{runtimeSettings.waitIntervalMinutes}</span>{" "}
+            minute(s) before resuming automatically.
+          </p>
+          <p className="mt-2 text-xs text-[#9eb8dc]">
+            Parallel accounts: {runtimeSettings.parallelAccounts} | Max posts per account each cycle: {runtimeSettings.maxPostsPerAccountPerCycle}
+          </p>
+        </div>
+      ) : null}
+
       <div className="app-card p-3">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <p className="text-sm font-semibold uppercase tracking-[0.15em] text-[#a6c8f0]">FLOW STAGES</p>
@@ -588,6 +679,42 @@ export default function AutomationPage() {
             <p className="text-[#a9c2e6]">Current Run Errors</p>
             <p className="mt-1 text-xl font-semibold">{runErrorCount}</p>
           </div>
+        </div>
+
+        <div className="mb-3 rounded-xl border border-[var(--border)] bg-[#0f1f3a] p-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#9ec4ef]">Paused Accounts</p>
+              <p className="mt-1 text-sm text-[#cde1ff]">
+                {pausedAccounts.length === 0
+                  ? "No accounts are currently paused for a timed resume."
+                  : `${pausedAccounts.length} account(s) will return to the active pool automatically.`}
+              </p>
+            </div>
+            {nextResumeAccount ? (
+              <span className="status-chip status-stopped">
+                Next resume: {nextResumeLabel}
+              </span>
+            ) : null}
+          </div>
+
+          {pausedAccounts.length > 0 ? (
+            <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {pausedAccounts.slice(0, 6).map((account) => (
+                <div key={account.id} className="rounded-lg border border-[#33557f] bg-[#0a1528] p-3 text-xs text-[#d7e7ff]">
+                  <p className="font-semibold text-[#f0f7ff]">{account.name}</p>
+                  <p className="mt-1 text-[#a9c2e6]">
+                    {new Date(account.disabledUntil!).getTime() > Date.now()
+                      ? `Paused until ${new Date(account.disabledUntil!).toLocaleString()}`
+                      : `Resume due now (scheduled for ${new Date(account.disabledUntil!).toLocaleString()})`}
+                  </p>
+                  <p className="mt-1 text-[#a9c2e6]">
+                    Reason: {account.disabledReason || "Facebook temporary posting limit reached"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="mb-3 grid gap-3 xl:grid-cols-[1.35fr_1fr]">

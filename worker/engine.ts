@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+﻿import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +28,10 @@ interface FbAccountRecord {
   socks5ProxyUsername?: string;
   socks5ProxyPassword?: string;
   isActive: boolean;
+  disabledAt?: string;
+  disabledUntil?: string;
+  disabledReason?: string;
+  disabledType?: "manual" | "automatic";
   createdAt: string;
   updatedAt: string;
 }
@@ -62,6 +66,10 @@ interface CsvPostRow {
 interface PendingPost {
   row: CsvPostRow;
   rowIndex: number;
+}
+
+interface ClaimedPost extends PendingPost {
+  claimToken: string;
 }
 
 interface LogRecord {
@@ -103,6 +111,8 @@ interface AutomationSettings {
   waitIntervalMinutes: number;
   delayBetweenAccountsMinutes: number;
   postsPerGroup: number;
+  maxPostsPerAccountPerCycle: number;
+  postsPerSession: number;
   commentWithPostImage: boolean;
   proxyRotationEnabled: boolean;
 }
@@ -122,6 +132,7 @@ const STOPPED_POLL_INTERVAL_MS = 2_000;
 const STOP_CHECK_INTERVAL_MS = 1_000;
 const ACTION_BLOCK_COOLDOWN_MS =
   Math.max(5, Number.parseInt(process.env.WORKER_ACTION_BLOCK_COOLDOWN_MINUTES ?? "45", 10) || 45) * 60_000;
+const AUTO_DISABLE_ACCOUNT_ON_ACTION_BLOCK = process.env.WORKER_AUTO_DISABLE_ON_LIMIT === "true";
 const STORAGE_DIR = path.join(process.cwd(), "storage");
 const AUTOMATION_STATE_PATH = path.join(STORAGE_DIR, "automation_state.json");
 const LOGS_PARQUET_PATH = path.join(STORAGE_DIR, "logs.parquet");
@@ -163,6 +174,8 @@ const DEFAULT_AUTOMATION_SETTINGS: AutomationSettings = {
   waitIntervalMinutes: 5,
   delayBetweenAccountsMinutes: 1,
   postsPerGroup: 1,
+  maxPostsPerAccountPerCycle: 10,
+  postsPerSession: 20,
   commentWithPostImage: false,
   proxyRotationEnabled: false,
 };
@@ -199,6 +212,10 @@ const fbAccountsSchema: Record<string, ParquetField> = {
   postFilter: { type: "UTF8", optional: true },
   postingMethod: { type: "UTF8", optional: true },
   isActive: { type: "BOOLEAN" },
+  disabledAt: { type: "UTF8", optional: true },
+  disabledUntil: { type: "UTF8", optional: true },
+  disabledReason: { type: "UTF8", optional: true },
+  disabledType: { type: "UTF8", optional: true },
   createdAt: { type: "UTF8" },
   updatedAt: { type: "UTF8" },
 };
@@ -206,6 +223,8 @@ const fbAccountsSchema: Record<string, ParquetField> = {
 let lastObservedAutomationState: StateValue | undefined;
 const readyAccountSessions = new Set<string>();
 const accountCooldownUntil = new Map<string, number>();
+const accountGroupCursor = new Map<string, number>();
+const csvFileWriteLocks = new Map<string, Promise<void>>();
 
 class AutomationStopRequestedError extends Error {
   constructor(message = "Automation stop requested by user.") {
@@ -224,6 +243,16 @@ function isActionBlockedMessage(message: string | undefined): boolean {
     text.includes("temporarily limited") ||
     text.includes("limit how often you can post") ||
     text.includes("try again later")
+  );
+}
+
+function isRecoverableBrowserSessionError(message: string | undefined): boolean {
+  const text = normalizeForComparison(message ?? "");
+  return (
+    text.includes("nosuchsessionerror") ||
+    text.includes("invalid session id") ||
+    text.includes("session deleted as the browser has closed") ||
+    text.includes("not connected to devtools")
   );
 }
 
@@ -334,37 +363,59 @@ function normalizeAutomationSettings(raw: unknown): AutomationSettings {
   }
 
   const candidate = raw as Partial<AutomationSettings>;
+  const normalizedParallelAccounts = Math.max(
+    1,
+    Math.floor(
+      typeof candidate.parallelAccounts === "number"
+        ? candidate.parallelAccounts
+        : DEFAULT_AUTOMATION_SETTINGS.parallelAccounts
+    )
+  );
+  const normalizedWaitIntervalMinutes = Math.max(
+    1,
+    Math.floor(
+      typeof candidate.waitIntervalMinutes === "number"
+        ? candidate.waitIntervalMinutes
+        : DEFAULT_AUTOMATION_SETTINGS.waitIntervalMinutes
+    )
+  );
+  const normalizedDelayBetweenAccountsMinutes = Math.max(
+    0,
+    Math.floor(
+      typeof candidate.delayBetweenAccountsMinutes === "number"
+        ? candidate.delayBetweenAccountsMinutes
+        : DEFAULT_AUTOMATION_SETTINGS.delayBetweenAccountsMinutes
+    )
+  );
+  const normalizedPostsPerGroup = Math.max(
+    1,
+    Math.floor(
+      typeof candidate.postsPerGroup === "number"
+        ? candidate.postsPerGroup
+        : DEFAULT_AUTOMATION_SETTINGS.postsPerGroup
+    )
+  );
+  const normalizedMaxPostsPerAccountPerCycle = Math.max(
+    1,
+    Math.floor(
+      typeof candidate.maxPostsPerAccountPerCycle === "number"
+        ? candidate.maxPostsPerAccountPerCycle
+        : DEFAULT_AUTOMATION_SETTINGS.maxPostsPerAccountPerCycle
+    )
+  );
+
   return {
-    parallelAccounts: Math.max(
+    parallelAccounts: normalizedParallelAccounts,
+    waitIntervalMinutes: normalizedWaitIntervalMinutes,
+    delayBetweenAccountsMinutes: normalizedDelayBetweenAccountsMinutes,
+    postsPerGroup: normalizedPostsPerGroup,
+    maxPostsPerAccountPerCycle: normalizedMaxPostsPerAccountPerCycle,
+    postsPerSession: Math.max(
       1,
       Math.floor(
-        typeof candidate.parallelAccounts === "number"
-          ? candidate.parallelAccounts
-          : DEFAULT_AUTOMATION_SETTINGS.parallelAccounts
-      )
-    ),
-    waitIntervalMinutes: Math.max(
-      1,
-      Math.floor(
-        typeof candidate.waitIntervalMinutes === "number"
-          ? candidate.waitIntervalMinutes
-          : DEFAULT_AUTOMATION_SETTINGS.waitIntervalMinutes
-      )
-    ),
-    delayBetweenAccountsMinutes: Math.max(
-      0,
-      Math.floor(
-        typeof candidate.delayBetweenAccountsMinutes === "number"
-          ? candidate.delayBetweenAccountsMinutes
-          : DEFAULT_AUTOMATION_SETTINGS.delayBetweenAccountsMinutes
-      )
-    ),
-    postsPerGroup: Math.max(
-      1,
-      Math.floor(
-        typeof candidate.postsPerGroup === "number"
-          ? candidate.postsPerGroup
-          : DEFAULT_AUTOMATION_SETTINGS.postsPerGroup
+        typeof candidate.postsPerSession === "number"
+          ? candidate.postsPerSession
+          : normalizedParallelAccounts * normalizedMaxPostsPerAccountPerCycle
       )
     ),
     commentWithPostImage:
@@ -515,20 +566,42 @@ interface BrowserLaunchResult {
   proxyProtocol?: ProxyProtocol;
 }
 
+function toProxyConfig(proxy: ProxyRecord): ProxyConfig {
+  return {
+    host: proxy.ipAddress,
+    port: proxy.port,
+    username: proxy.username,
+    password: proxy.password,
+  };
+}
+
+function getStickyProxyIndex(accountId: string, poolSize: number): number {
+  if (poolSize <= 0) {
+    return 0;
+  }
+
+  let hash = 0;
+  for (let index = 0; index < accountId.length; index += 1) {
+    hash = (hash * 31 + accountId.charCodeAt(index)) >>> 0;
+  }
+
+  return hash % poolSize;
+}
+
 async function resolveAccountProxyConfig(
-  account: FbAccountRecord
+  account: FbAccountRecord,
+  settings?: AutomationSettings
 ): Promise<ProxyConfig | undefined> {
+  const shouldReadProxyPool = Boolean(account.proxyId) || Boolean(settings?.proxyRotationEnabled);
+  const enabledPool = shouldReadProxyPool
+    ? (await readParquetRows<ProxyRecord>(PROXIES_PARQUET_PATH)).filter((proxy) => proxy.enabled !== false)
+    : [];
+
   if (account.proxyId) {
-    const proxies = await readParquetRows<ProxyRecord>(PROXIES_PARQUET_PATH);
-    const selected = proxies.find((proxy) => proxy.id === account.proxyId && proxy.enabled !== false);
+    const selected = enabledPool.find((proxy) => proxy.id === account.proxyId);
 
     if (selected) {
-      return {
-        host: selected.ipAddress,
-        port: selected.port,
-        username: selected.username,
-        password: selected.password,
-      };
+      return toProxyConfig(selected);
     }
   }
 
@@ -539,6 +612,11 @@ async function resolveAccountProxyConfig(
       username: account.socks5ProxyUsername,
       password: account.socks5ProxyPassword,
     };
+  }
+
+  if (settings?.proxyRotationEnabled && enabledPool.length > 0) {
+    const stickyIndex = getStickyProxyIndex(account.id, enabledPool.length);
+    return toProxyConfig(enabledPool[stickyIndex]);
   }
 
   return undefined;
@@ -597,10 +675,37 @@ async function appendLog(log: Omit<LogRecord, "id" | "createdAt">): Promise<void
 async function isAccountEnabledInDashboard(accountId: string): Promise<boolean> {
   const accounts = await readParquetRows<FbAccountRecord>(FB_ACCOUNTS_PARQUET_PATH);
   const account = accounts.find((item) => item.id === accountId);
-  return account?.isActive === true;
+
+  if (!account) {
+    return false;
+  }
+
+  if (account.isActive) {
+    return true;
+  }
+
+  const disabledUntilMs = account.disabledUntil ? Date.parse(account.disabledUntil) : Number.NaN;
+  if (
+    account.disabledType === "automatic" &&
+    Number.isFinite(disabledUntilMs) &&
+    disabledUntilMs <= Date.now()
+  ) {
+    await setAccountEnabledInDashboard(accountId, true).catch(() => undefined);
+    return true;
+  }
+
+  return false;
 }
 
-async function setAccountEnabledInDashboard(accountId: string, enabled: boolean): Promise<boolean> {
+async function setAccountEnabledInDashboard(
+  accountId: string,
+  enabled: boolean,
+  disableInfo?: {
+    reason: string;
+    type: "manual" | "automatic";
+    until?: string;
+  }
+): Promise<boolean> {
   const accounts = await readParquetRows<FbAccountRecord>(FB_ACCOUNTS_PARQUET_PATH);
   const index = accounts.findIndex((item) => item.id === accountId);
 
@@ -615,6 +720,10 @@ async function setAccountEnabledInDashboard(accountId: string, enabled: boolean)
   accounts[index] = {
     ...accounts[index],
     isActive: enabled,
+    disabledAt: enabled ? undefined : new Date().toISOString(),
+    disabledUntil: enabled ? undefined : disableInfo?.until,
+    disabledReason: enabled === false && disableInfo ? disableInfo.reason : undefined,
+    disabledType: enabled === false && disableInfo ? disableInfo.type : undefined,
     updatedAt: new Date().toISOString(),
   };
 
@@ -943,7 +1052,7 @@ async function clickFirstVisibleCommentButton(
     ".//*[@data-ad-rendering-role='comment_button']/ancestor::*[@role='button' or @role='link'][1]",
     ".//*[@role='button' or @role='link'][contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'leave a comment') or contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
     ".//span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]/ancestor::*[@role='button' or @role='link'][1]",
-    ".//*[@role='button' or @role='link'][contains(normalize-space(.), 'Comment') or contains(normalize-space(.), 'comment') or contains(normalize-space(.), 'تعليق')]",
+    ".//*[@role='button' or @role='link'][contains(normalize-space(.), 'Comment') or contains(normalize-space(.), 'comment') or contains(normalize-space(.), '╪¬╪╣┘ä┘è┘é')]",
   ];
 
   for (const selector of selectors) {
@@ -1119,6 +1228,15 @@ function normalizeStatus(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function isProcessingPostStatus(status: string): boolean {
+  const normalized = normalizeStatus(status);
+  return normalized.startsWith("processing:");
+}
+
+function buildPostClaimToken(claimOwner: string): string {
+  return `processing:${claimOwner}:${randomUUID()}`;
+}
+
 async function validateCsvHeaders(csvFilePath: string): Promise<void> {
   const content = await fs.readFile(csvFilePath, "utf8");
   const firstLine = content.split(/\r?\n/)[0] ?? "";
@@ -1153,6 +1271,122 @@ async function readCsvRows(csvFilePath: string): Promise<CsvPostRow[]> {
       })
       .on("end", () => resolve(rows))
       .on("error", (error) => reject(error));
+  });
+}
+
+async function writeCsvRows(csvFilePath: string, rows: CsvPostRow[]): Promise<void> {
+  const writer = createObjectCsvWriter({
+    path: csvFilePath,
+    header: CSV_HEADERS.map((id) => ({ id, title: id })),
+  });
+
+  await writer.writeRecords(rows);
+}
+
+async function withCsvFileLock<T>(csvFilePath: string, task: () => Promise<T>): Promise<T> {
+  const resolvedPath = resolveCsvPath(csvFilePath);
+  const previous = csvFileWriteLocks.get(resolvedPath) ?? Promise.resolve();
+
+  let releaseCurrentLock: () => void = () => undefined;
+  const currentLock = new Promise<void>((resolve) => {
+    releaseCurrentLock = resolve;
+  });
+  const queuedLock = previous.then(() => currentLock);
+  csvFileWriteLocks.set(resolvedPath, queuedLock);
+
+  await previous;
+
+  try {
+    return await task();
+  } finally {
+    releaseCurrentLock();
+    if (csvFileWriteLocks.get(resolvedPath) === queuedLock) {
+      csvFileWriteLocks.delete(resolvedPath);
+    }
+  }
+}
+
+async function claimNextPost(
+  csvFilePath: string,
+  claimOwner: string
+): Promise<ClaimedPost | null> {
+  return withCsvFileLock(csvFilePath, async () => {
+    const resolvedPath = resolveCsvPath(csvFilePath);
+    const rows = await readCsvRows(resolvedPath);
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const status = normalizeStatus(row.status);
+
+      if (isCompletedPostStatus(status) || isProcessingPostStatus(status)) {
+        continue;
+      }
+
+      const claimToken = buildPostClaimToken(claimOwner);
+      rows[index] = {
+        ...row,
+        status: claimToken,
+      };
+      await writeCsvRows(resolvedPath, rows);
+
+      return {
+        row,
+        rowIndex: index,
+        claimToken,
+      };
+    }
+
+    return null;
+  });
+}
+
+async function finalizeClaimedPostAsDone(
+  csvFilePath: string,
+  rowIndex: number,
+  claimToken: string
+): Promise<void> {
+  await withCsvFileLock(csvFilePath, async () => {
+    const resolvedPath = resolveCsvPath(csvFilePath);
+    const rows = await readCsvRows(resolvedPath);
+
+    if (rowIndex < 0 || rowIndex >= rows.length) {
+      throw new Error(`CSV row index out of bounds: ${rowIndex}`);
+    }
+
+    if (normalizeStatus(rows[rowIndex].status) !== normalizeStatus(claimToken)) {
+      return;
+    }
+
+    rows[rowIndex] = {
+      ...rows[rowIndex],
+      status: "done",
+    };
+    await writeCsvRows(resolvedPath, rows);
+  });
+}
+
+async function releaseClaimedPost(
+  csvFilePath: string,
+  rowIndex: number,
+  claimToken: string
+): Promise<void> {
+  await withCsvFileLock(csvFilePath, async () => {
+    const resolvedPath = resolveCsvPath(csvFilePath);
+    const rows = await readCsvRows(resolvedPath);
+
+    if (rowIndex < 0 || rowIndex >= rows.length) {
+      return;
+    }
+
+    if (normalizeStatus(rows[rowIndex].status) !== normalizeStatus(claimToken)) {
+      return;
+    }
+
+    rows[rowIndex] = {
+      ...rows[rowIndex],
+      status: "",
+    };
+    await writeCsvRows(resolvedPath, rows);
   });
 }
 
@@ -1608,7 +1842,8 @@ export async function publishPost(
   driver: WebDriver,
   groupId: string,
   postData: Pick<CsvPostRow, "post_text" | "image_url" | "comment_link">,
-  log: StepLogger = async () => {}
+  log: StepLogger = async () => {},
+  options?: { commentWithPostImage?: boolean }
 ): Promise<PostResult> {
   const normalizedPostText = normalizeWhitespace(postData.post_text);
   const webDriverPostText = toWebDriverSafeText(normalizedPostText);
@@ -1625,13 +1860,13 @@ export async function publishPost(
 
   const groupUrl = `https://facebook.com/groups/${groupId}`;
 
-  // ── Step 1: Navigate to group ──
+  // ΓöÇΓöÇ Step 1: Navigate to group ΓöÇΓöÇ
   await log("Navigating to group", groupUrl);
   await navigateWithRetry(driver, groupUrl, 3);
   await driver.wait(until.elementLocated(By.css("body")), 20_000);
   await log("Group page loaded");
 
-  // ── Step 2: Open the post composer ──
+  // ΓöÇΓöÇ Step 2: Open the post composer ΓöÇΓöÇ
   await log("Looking for 'Create post' button");
   const createPostActivator = await waitForFirstVisibleXpath(
     driver,
@@ -1648,7 +1883,7 @@ export async function publishPost(
     await driver.executeScript("arguments[0].click();", createPostActivator);
   });
 
-  // ── Step 3: Type post text ──
+  // ΓöÇΓöÇ Step 3: Type post text ΓöÇΓöÇ
   await log("Waiting for post composer textbox");
   const postInput = await waitForComposerTextbox(driver, 25_000);
 
@@ -1658,9 +1893,10 @@ export async function publishPost(
   await log("Post text entered");
 
   let downloadedImagePath: string | null = null;
+  let downloadedCommentImagePath: string | null = null;
   let imageWarning: string | undefined;
   try {
-    // ── Step 4: Upload image (if any) ──
+    // ΓöÇΓöÇ Step 4: Upload image (if any) ΓöÇΓöÇ
     if (postData.image_url.trim()) {
       try {
         await log("Downloading image for upload", postData.image_url.trim().slice(0, 80));
@@ -1757,7 +1993,7 @@ export async function publishPost(
       await log("No image URL for this post, skipping image upload");
     }
 
-    // ── Step 4b: Dismiss any stale error overlays before looking for Post button ──
+    // ΓöÇΓöÇ Step 4b: Dismiss any stale error overlays before looking for Post button ΓöÇΓöÇ
     try {
       await log("Running robust error check before final submit");
 
@@ -1810,7 +2046,7 @@ export async function publishPost(
       }
     } catch { /* ignore */ }
 
-    // ── Step 5: Ensure we are on the main composer, then click Post/Submit ──
+    // ΓöÇΓöÇ Step 5: Ensure we are on the main composer, then click Post/Submit ΓöÇΓöÇ
     if (await dismissAddToYourPostOverlay(driver)) {
       await log("Detected 'Add to your post' overlay, returned to main composer");
     }
@@ -1877,7 +2113,7 @@ export async function publishPost(
       };
     }
 
-    // ── Step 6: Add comment link (if any) after quick group search ──
+    // ΓöÇΓöÇ Step 6: Add comment link (if any) after quick group search ΓöÇΓöÇ
     if (!postData.comment_link.trim()) {
       const details = [
         webDriverPostText.removedNonBmp
@@ -1919,6 +2155,7 @@ export async function publishPost(
 
     await log("Adding comment link to post", postData.comment_link.trim().slice(0, 60));
     let commentWarning: string | undefined;
+    let commentImageWarning: string | undefined;
     try {
       const actionBlockedText = await detectFacebookActionBlock(driver);
       if (actionBlockedText) {
@@ -2044,6 +2281,53 @@ export async function publishPost(
         }
       }
 
+      if (options?.commentWithPostImage && postData.image_url.trim()) {
+        await log("Comment image mode enabled, attempting to attach image");
+        let commentImagePath = downloadedImagePath;
+
+        if (!commentImagePath) {
+          try {
+            commentImagePath = await downloadImageToTemp(postData.image_url.trim(), driver);
+            downloadedCommentImagePath = commentImagePath;
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            commentImageWarning = `Comment image skipped: ${reason}`;
+            await log("Comment image download failed", reason);
+          }
+        }
+
+        if (commentImagePath) {
+          let imageInputs = await matchedArticle.findElements(
+            By.css("input[type='file'][accept*='image'], input[type='file']")
+          );
+
+          if (imageInputs.length === 0) {
+            imageInputs = await driver.findElements(
+              By.css("div[role='article'] input[type='file'], form input[type='file'][accept*='image'], form input[type='file']")
+            );
+          }
+
+          if (imageInputs.length > 0) {
+            try {
+              await driver.executeScript(
+                "arguments[0].style.display = 'block'; arguments[0].style.visibility = 'visible'; arguments[0].style.opacity = '1';",
+                imageInputs[0]
+              );
+              await imageInputs[0].sendKeys(commentImagePath);
+              await driver.sleep(1_000);
+              await log("Comment image attached");
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : String(error);
+              commentImageWarning = `Comment image skipped: ${reason}`;
+              await log("Comment image attach failed", reason);
+            }
+          } else {
+            commentImageWarning = "Comment image skipped: no comment image uploader was found.";
+            await log("Comment image upload skipped", commentImageWarning);
+          }
+        }
+      }
+
       let submitButtons = await driver.findElements(
         By.xpath(
           "//*[@role='button'][contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'post comment')]"
@@ -2080,6 +2364,7 @@ export async function publishPost(
 
     const details = [
       commentWarning,
+      commentImageWarning,
       webDriverPostText.removedNonBmp
         ? "Some non-BMP characters were removed from post text because ChromeDriver cannot send them via sendKeys."
         : undefined,
@@ -2099,6 +2384,13 @@ export async function publishPost(
   } finally {
     if (downloadedImagePath) {
       await fs.unlink(downloadedImagePath).catch(() => undefined);
+    }
+
+    if (
+      downloadedCommentImagePath &&
+      downloadedCommentImagePath !== downloadedImagePath
+    ) {
+      await fs.unlink(downloadedCommentImagePath).catch(() => undefined);
     }
   }
 }
@@ -2806,7 +3098,13 @@ async function loginAndCaptureSession(
 async function executeSeleniumPost(
   account: FbAccountRecord,
   group: FbGroupRecord,
-  pendingPost: CsvPostRow
+  pendingPost: CsvPostRow,
+  settings: AutomationSettings,
+  sharedContext?: {
+    browser: BrowserLaunchResult;
+    driver: WebDriver;
+    proxyConfig?: ProxyConfig;
+  }
 ): Promise<PostResult> {
   if (IS_DRY_RUN) {
     return {
@@ -2816,90 +3114,101 @@ async function executeSeleniumPost(
     };
   }
 
-  const sessionCookies = await getStoredSessionCookies(account.id);
-  const proxyConfig = await resolveAccountProxyConfig(account);
-
-  await appendLog({
-    level: "info",
-    message: `Preparing account ${account.name} for group ${group.groupId}. Connection: ${describeProxy(proxyConfig)}.`,
-    accountId: account.id,
-    groupId: group.id,
-    details: `Saved cookie count: ${sessionCookies.length}`,
-  });
-
-  const browser = await initializeBrowser(
-    proxyConfig,
-    sessionCookies
-  );
-  const driver = browser.driver;
+  const usingSharedBrowser = Boolean(sharedContext);
+  let browser: BrowserLaunchResult | undefined = sharedContext?.browser;
+  let driver: WebDriver | undefined = sharedContext?.driver;
+  let proxyConfig: ProxyConfig | undefined = sharedContext?.proxyConfig;
   let shouldHoldBrowser = false;
-
-  await appendVisualTraceLog(
-    driver,
-    {
-      level: "info",
-      message: `[Visual] Browser opened for account ${account.name} in group ${group.groupId}.`,
-      accountId: account.id,
-      groupId: group.id,
-      details: "Session check start",
-    },
-    `publish-browser-open-${account.id}-${group.groupId}`
-  );
 
   try {
     await throwIfAutomationStopped("before browser automation starts");
 
-    if (proxyConfig) {
-      const proxyPublicIp = await detectActivePublicIp(driver);
+    if (!usingSharedBrowser) {
+      const sessionCookies = await getStoredSessionCookies(account.id);
+      proxyConfig = await resolveAccountProxyConfig(account, settings);
+
       await appendLog({
         level: "info",
-        message: proxyPublicIp
-          ? `Account ${account.name} connected via proxy ${describeProxy(proxyConfig)} with public IP ${proxyPublicIp}.`
-          : `Account ${account.name} connected via proxy ${describeProxy(proxyConfig)} (public IP check unavailable).`,
+        message: `Preparing account ${account.name} for group ${group.groupId}. Connection: ${describeProxy(proxyConfig)}.`,
         accountId: account.id,
         groupId: group.id,
-      });
-    }
-
-    let authenticated = await hasAuthenticatedSession(driver);
-
-    if (!authenticated) {
-      await appendLog({
-        level: "info",
-        message: `No valid session for account ${account.name}. Starting login flow.`,
-        accountId: account.id,
-        groupId: group.id,
+        details: `Saved cookie count: ${sessionCookies.length}`,
       });
 
-      const freshCookies = await loginAndCaptureSession(driver, account, {
-        flow: "publish",
-        groupId: group.groupId,
-        groupEntityId: group.id,
-      });
-      if (freshCookies.length > 0) {
-        await saveStoredSessionCookies(account.id, freshCookies);
+      browser = await initializeBrowser(
+        proxyConfig,
+        sessionCookies
+      );
+      driver = browser.driver;
+
+      await appendVisualTraceLog(
+        driver,
+        {
+          level: "info",
+          message: `[Visual] Browser opened for account ${account.name} in group ${group.groupId}.`,
+          accountId: account.id,
+          groupId: group.id,
+          details: "Session check start",
+        },
+        `publish-browser-open-${account.id}-${group.groupId}`
+      );
+
+      if (proxyConfig) {
+        const proxyPublicIp = await detectActivePublicIp(driver);
         await appendLog({
-          level: "success",
-          message: `Account ${account.name} logged in successfully and session cookies were saved (${freshCookies.length}).`,
+          level: "info",
+          message: proxyPublicIp
+            ? `Account ${account.name} connected via proxy ${describeProxy(proxyConfig)} with public IP ${proxyPublicIp}.`
+            : `Account ${account.name} connected via proxy ${describeProxy(proxyConfig)} (public IP check unavailable).`,
           accountId: account.id,
           groupId: group.id,
         });
       }
-      authenticated = await hasAuthenticatedSession(driver);
-    } else {
-      await appendLog({
-        level: "success",
-        message: `Account ${account.name} authenticated using saved cookies.`,
-        accountId: account.id,
-        groupId: group.id,
-      });
+
+      let authenticated = await hasAuthenticatedSession(driver);
+
+      if (!authenticated) {
+        await appendLog({
+          level: "info",
+          message: `No valid session for account ${account.name}. Starting login flow.`,
+          accountId: account.id,
+          groupId: group.id,
+        });
+
+        const freshCookies = await loginAndCaptureSession(driver, account, {
+          flow: "publish",
+          groupId: group.groupId,
+          groupEntityId: group.id,
+        });
+        if (freshCookies.length > 0) {
+          await saveStoredSessionCookies(account.id, freshCookies);
+          await appendLog({
+            level: "success",
+            message: `Account ${account.name} logged in successfully and session cookies were saved (${freshCookies.length}).`,
+            accountId: account.id,
+            groupId: group.id,
+          });
+        }
+        authenticated = await hasAuthenticatedSession(driver);
+      } else {
+        await appendLog({
+          level: "success",
+          message: `Account ${account.name} authenticated using saved cookies.`,
+          accountId: account.id,
+          groupId: group.id,
+        });
+      }
+
+      if (!authenticated) {
+        return {
+          success: false,
+          message: "Unable to establish authenticated Facebook session",
+        };
+      }
     }
 
-    if (!authenticated) {
-      return {
-        success: false,
-        message: "Unable to establish authenticated Facebook session",
-      };
+    if (!driver) {
+      throw new Error("Browser driver was not initialized for publish execution.");
     }
 
     await appendLog({
@@ -2925,7 +3234,9 @@ async function executeSeleniumPost(
       post_text: pendingPost.post_text,
       image_url: pendingPost.image_url,
       comment_link: pendingPost.comment_link,
-    }, stepLogger);
+    }, stepLogger, {
+      commentWithPostImage: settings.commentWithPostImage,
+    });
 
     if (!publishResult.success) {
       shouldHoldBrowser = true;
@@ -2959,6 +3270,7 @@ async function executeSeleniumPost(
       success: true,
       message: publishResult.message,
       details: publishResult.details,
+      commentWarning: publishResult.commentWarning,
     };
   } catch (error) {
     if (isAutomationStopRequestedError(error)) {
@@ -2992,12 +3304,14 @@ async function executeSeleniumPost(
       details,
     };
   } finally {
-    await holdVisibleBrowserForDebug(
-      `account=${account.name}, group=${group.groupId}`,
-      DEBUG_BROWSER_HOLD_FAILURE_ONLY ? shouldHoldBrowser : true
-    );
-    await driver.quit().catch(() => undefined);
-    await browser.cleanup().catch(() => undefined);
+    if (!usingSharedBrowser && driver && browser) {
+      await holdVisibleBrowserForDebug(
+        `account=${account.name}, group=${group.groupId}`,
+        DEBUG_BROWSER_HOLD_FAILURE_ONLY ? shouldHoldBrowser : true
+      );
+      await driver.quit().catch(() => undefined);
+      await browser.cleanup().catch(() => undefined);
+    }
   }
 }
 
@@ -3022,9 +3336,47 @@ function getMappedAccountForGroup(
   return activeAccounts[groupIndex % activeAccounts.length];
 }
 
-async function preflightAccountSession(account: FbAccountRecord): Promise<boolean> {
+function getMappedAccountsForGroup(
+  group: FbGroupRecord,
+  activeAccounts: FbAccountRecord[],
+  groupIndex: number
+): FbAccountRecord[] {
+  const groupWithMapping = group as FbGroupRecord & {
+    fbAccountId?: string;
+    fbAccountIds?: string[] | string;
+    accountId?: string;
+  };
+
+  const explicitList = Array.isArray(groupWithMapping.fbAccountIds)
+    ? groupWithMapping.fbAccountIds
+    : String(groupWithMapping.fbAccountIds ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+  const legacyList = String(groupWithMapping.fbAccountId ?? groupWithMapping.accountId ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const mergedAccountIds = Array.from(new Set([...explicitList, ...legacyList]));
+  const mappedAccounts = mergedAccountIds
+    .map((accountId) => activeAccounts.find((account) => account.id === accountId))
+    .filter((account): account is FbAccountRecord => Boolean(account));
+
+  if (mappedAccounts.length > 0) {
+    return mappedAccounts;
+  }
+
+  return [activeAccounts[groupIndex % activeAccounts.length]];
+}
+
+async function preflightAccountSession(
+  account: FbAccountRecord,
+  settings: AutomationSettings
+): Promise<boolean> {
   const sessionCookies = await getStoredSessionCookies(account.id);
-  const proxyConfig = await resolveAccountProxyConfig(account);
+  const proxyConfig = await resolveAccountProxyConfig(account, settings);
 
   await appendLog({
     level: "info",
@@ -3126,80 +3478,236 @@ async function preflightAccountSession(account: FbAccountRecord): Promise<boolea
 async function processGroupPosts(
   group: FbGroupRecord,
   account: FbAccountRecord,
-  settings: AutomationSettings
-): Promise<void> {
-  const postCooldownMs = settings.waitIntervalMinutes * 60_000;
+  settings: AutomationSettings,
+  maxPostsForAccountInCycle: number
+): Promise<{ postedCount: number; stopRequested: boolean }> {
+  const postTransitionDelayMs = 1_500;
+  const targetPostsForGroup = Math.min(settings.postsPerGroup, Math.max(0, maxPostsForAccountInCycle));
+  let postedCount = 0;
+  let recoverableSessionCrashCount = 0;
+  let sharedContext:
+    | {
+        browser: BrowserLaunchResult;
+        driver: WebDriver;
+        proxyConfig?: ProxyConfig;
+      }
+    | undefined;
+  let shouldHoldBrowser = false;
 
-  for (let postCounter = 0; postCounter < settings.postsPerGroup; postCounter += 1) {
-    if (!(await isAutomationRunning())) {
-      await appendLog({
-        level: "info",
-        message: `Automation stop requested. Exiting group loop for ${group.groupId}.`,
-        accountId: account.id,
-        groupId: group.id,
-      });
-      break;
-    }
+  if (targetPostsForGroup <= 0) {
+    return { postedCount, stopRequested: false };
+  }
 
-    const pending = await fetchNextPost(group.csvPath);
-    if (!pending) {
-      await appendLog({
-        level: "info",
-        message: `No pending posts in CSV for group ${group.groupId}.`,
-        accountId: account.id,
-        groupId: group.id,
-      });
-      break;
-    }
-
-    const result = await executeSeleniumPost(account, group, pending.row);
-    if (result.message === "Automation stop requested by user.") {
-      await appendLog({
-        level: "info",
-        message: `Automation stop requested. Ending current cycle for group ${group.groupId}.`,
-        accountId: account.id,
-        groupId: group.id,
-      });
-      break;
-    }
-
-    if (result.success) {
-      await markPostAsDone(group.csvPath, pending.rowIndex);
-      await appendLog({
-        level: "success",
-        message: `[POSTED] ${result.message} | account=${account.name} | groupId=${group.groupId} | post=${postCounter + 1}/${settings.postsPerGroup}`,
-        accountId: account.id,
-        groupId: group.id,
-        details: result.details,
-      });
-    } else {
-      if (isActionBlockedMessage(result.message) || isActionBlockedMessage(result.details)) {
-        const cooldownUntil = Date.now() + ACTION_BLOCK_COOLDOWN_MS;
-        accountCooldownUntil.set(account.id, cooldownUntil);
-        readyAccountSessions.delete(account.id);
-        await setAccountEnabledInDashboard(account.id, false).catch(() => undefined);
+  try {
+    for (let postCounter = 0; postCounter < targetPostsForGroup; postCounter += 1) {
+      if (!(await isAutomationRunning())) {
         await appendLog({
-          level: "error",
-          message: `Account ${account.name} hit Facebook temporary limit and was auto-disabled. Re-enable it manually from the dashboard when ready.`,
+          level: "info",
+          message: `Automation stop requested. Exiting group loop for ${group.groupId}.`,
+          accountId: account.id,
+          groupId: group.id,
+        });
+        return { postedCount, stopRequested: true };
+      }
+
+      const claimOwner = `${account.id}:${group.id}`;
+      const pending = await claimNextPost(group.csvPath, claimOwner);
+      if (!pending) {
+        await appendLog({
+          level: "info",
+          message: `No pending posts in CSV for group ${group.groupId}.`,
+          accountId: account.id,
+          groupId: group.id,
+        });
+        break;
+      }
+
+      if (!sharedContext) {
+        const sessionCookies = await getStoredSessionCookies(account.id);
+        const proxyConfig = await resolveAccountProxyConfig(account, settings);
+
+        await appendLog({
+          level: "info",
+          message: `Preparing account ${account.name} for group ${group.groupId}. Connection: ${describeProxy(proxyConfig)}.`,
+          accountId: account.id,
+          groupId: group.id,
+          details: `Saved cookie count: ${sessionCookies.length}`,
+        });
+
+        const browser = await initializeBrowser(proxyConfig, sessionCookies);
+        const driver = browser.driver;
+
+        await appendVisualTraceLog(
+          driver,
+          {
+            level: "info",
+            message: `[Visual] Browser opened for account ${account.name} in group ${group.groupId}.`,
+            accountId: account.id,
+            groupId: group.id,
+            details: "Session check start",
+          },
+          `publish-browser-open-${account.id}-${group.groupId}`
+        );
+
+        if (proxyConfig) {
+          const proxyPublicIp = await detectActivePublicIp(driver);
+          await appendLog({
+            level: "info",
+            message: proxyPublicIp
+              ? `Account ${account.name} connected via proxy ${describeProxy(proxyConfig)} with public IP ${proxyPublicIp}.`
+              : `Account ${account.name} connected via proxy ${describeProxy(proxyConfig)} (public IP check unavailable).`,
+            accountId: account.id,
+            groupId: group.id,
+          });
+        }
+
+        let authenticated = await hasAuthenticatedSession(driver);
+        if (!authenticated) {
+          await appendLog({
+            level: "info",
+            message: `No valid session for account ${account.name}. Starting login flow.`,
+            accountId: account.id,
+            groupId: group.id,
+          });
+
+          const freshCookies = await loginAndCaptureSession(driver, account, {
+            flow: "publish",
+            groupId: group.groupId,
+            groupEntityId: group.id,
+          });
+          if (freshCookies.length > 0) {
+            await saveStoredSessionCookies(account.id, freshCookies);
+            await appendLog({
+              level: "success",
+              message: `Account ${account.name} logged in successfully and session cookies were saved (${freshCookies.length}).`,
+              accountId: account.id,
+              groupId: group.id,
+            });
+          }
+
+          authenticated = await hasAuthenticatedSession(driver);
+        } else {
+          await appendLog({
+            level: "success",
+            message: `Account ${account.name} authenticated using saved cookies.`,
+            accountId: account.id,
+            groupId: group.id,
+          });
+        }
+
+        if (!authenticated) {
+          shouldHoldBrowser = true;
+          await appendLog({
+            level: "error",
+            message: `Unable to establish authenticated Facebook session for account ${account.name}.`,
+            accountId: account.id,
+            groupId: group.id,
+          });
+          break;
+        }
+
+        sharedContext = {
+          browser,
+          driver,
+          proxyConfig,
+        };
+      }
+
+      const result = await executeSeleniumPost(account, group, pending.row, settings, sharedContext);
+      if (result.message === "Automation stop requested by user.") {
+        await releaseClaimedPost(group.csvPath, pending.rowIndex, pending.claimToken).catch(() => undefined);
+        return { postedCount, stopRequested: true };
+      }
+
+      if (result.success) {
+        recoverableSessionCrashCount = 0;
+        await finalizeClaimedPostAsDone(group.csvPath, pending.rowIndex, pending.claimToken);
+        postedCount += 1;
+        await appendLog({
+          level: "success",
+          message: `[POSTED] ${result.message} | account=${account.name} | groupId=${group.groupId} | post=${postCounter + 1}/${targetPostsForGroup}`,
           accountId: account.id,
           groupId: group.id,
           details: result.details,
         });
+
+        if (result.commentWarning) {
+          shouldHoldBrowser = true;
+        }
+      } else {
+        const recoverableSessionError =
+          isRecoverableBrowserSessionError(result.message) ||
+          isRecoverableBrowserSessionError(result.details);
+
+        if (recoverableSessionError && recoverableSessionCrashCount < 2) {
+          recoverableSessionCrashCount += 1;
+          await releaseClaimedPost(group.csvPath, pending.rowIndex, pending.claimToken).catch(() => undefined);
+          await appendLog({
+            level: "info",
+            message: `Browser session dropped for account ${account.name} in group ${group.groupId}. Re-initializing browser and retrying post ${postCounter + 1}/${targetPostsForGroup} (attempt ${recoverableSessionCrashCount}/2).`,
+            accountId: account.id,
+            groupId: group.id,
+            details: result.details,
+          });
+
+          if (sharedContext) {
+            await sharedContext.driver.quit().catch(() => undefined);
+            await sharedContext.browser.cleanup().catch(() => undefined);
+            sharedContext = undefined;
+          }
+
+          postCounter -= 1;
+          continue;
+        }
+
+        await releaseClaimedPost(group.csvPath, pending.rowIndex, pending.claimToken).catch(() => undefined);
+        shouldHoldBrowser = true;
+        if (isActionBlockedMessage(result.message) || isActionBlockedMessage(result.details)) {
+          const cooldownUntil = Date.now() + ACTION_BLOCK_COOLDOWN_MS;
+          accountCooldownUntil.set(account.id, cooldownUntil);
+          readyAccountSessions.delete(account.id);
+
+          await setAccountEnabledInDashboard(account.id, false, {
+            reason: "Facebook temporary posting limit reached",
+            type: "automatic",
+            until: new Date(cooldownUntil).toISOString(),
+          }).catch(() => undefined);
+
+          await appendLog({
+            level: "error",
+            message: `Account ${account.name} hit Facebook temporary limit and was paused until ${new Date(
+              cooldownUntil
+            ).toLocaleString()}. It will automatically return to the active pool after the pause ends.`,
+            accountId: account.id,
+            groupId: group.id,
+            details: result.details,
+          });
+        }
+
+        await appendLog({
+          level: "error",
+          message: `[FAILED] ${result.message} | account=${account.name} | groupId=${group.groupId} | post=${postCounter + 1}/${targetPostsForGroup}`,
+          accountId: account.id,
+          groupId: group.id,
+          details: result.details,
+        });
+        break;
       }
 
-      await appendLog({
-        level: "error",
-        message: `[FAILED] ${result.message} | account=${account.name} | groupId=${group.groupId} | post=${postCounter + 1}/${settings.postsPerGroup}`,
-        accountId: account.id,
-        groupId: group.id,
-        details: result.details,
-      });
-      // Stop trying more posts to this group if one fails
-      break;
+      if (postCounter < targetPostsForGroup - 1 && postTransitionDelayMs > 0) {
+        await sleepWithStopCheck(postTransitionDelayMs, `between posts in group ${group.groupId}`);
+      }
     }
 
-    if (postCounter < settings.postsPerGroup - 1) {
-      await sleepWithStopCheck(postCooldownMs, `between posts in group ${group.groupId}`);
+    return { postedCount, stopRequested: false };
+  } finally {
+    if (sharedContext) {
+      await holdVisibleBrowserForDebug(
+        `account=${account.name}, group=${group.groupId}`,
+        DEBUG_BROWSER_HOLD_FAILURE_ONLY ? shouldHoldBrowser : true
+      );
+      await sharedContext.driver.quit().catch(() => undefined);
+      await sharedContext.browser.cleanup().catch(() => undefined);
     }
   }
 }
@@ -3230,28 +3738,85 @@ async function runCycle(): Promise<number> {
 
     await appendLog({
       level: "info",
-      message: `Effective settings: parallelAccounts=${automation.settings.parallelAccounts}, waitIntervalMinutes=${automation.settings.waitIntervalMinutes}, delayBetweenAccountsMinutes=${automation.settings.delayBetweenAccountsMinutes}, postsPerGroup=${automation.settings.postsPerGroup}, commentWithPostImage=${automation.settings.commentWithPostImage}, proxyRotationEnabled=${automation.settings.proxyRotationEnabled}.`,
+      message: `Effective settings: parallelAccounts=${automation.settings.parallelAccounts}, waitIntervalMinutes=${automation.settings.waitIntervalMinutes}, delayBetweenAccountsMinutes=${automation.settings.delayBetweenAccountsMinutes}, postsPerGroup=${automation.settings.postsPerGroup}, maxPostsPerAccountPerCycle=${automation.settings.maxPostsPerAccountPerCycle}, postsPerSession=${automation.settings.postsPerSession}, commentWithPostImage=${automation.settings.commentWithPostImage}, proxyRotationEnabled=${automation.settings.proxyRotationEnabled}.`,
     });
   }
 
-  const accounts = await readParquetRows<FbAccountRecord>(FB_ACCOUNTS_PARQUET_PATH);
+  let accounts = await readParquetRows<FbAccountRecord>(FB_ACCOUNTS_PARQUET_PATH);
   const groups = await readParquetRows<FbGroupRecord>(FB_GROUPS_PARQUET_PATH);
 
-  const activeAccounts = accounts.filter((account) => account.isActive === true);
-  const activeGroups = groups.filter((group) => group.isActive === true);
+  const now = Date.now();
+  let restoredCount = 0;
+  const refreshedAccounts = accounts.map((account) => {
+    if (account.isActive) {
+      return account;
+    }
+
+    const disabledUntilMs = account.disabledUntil ? Date.parse(account.disabledUntil) : Number.NaN;
+    const shouldRestore =
+      account.disabledType === "automatic" &&
+      Number.isFinite(disabledUntilMs) &&
+      disabledUntilMs <= now;
+
+    if (!shouldRestore) {
+      return account;
+    }
+
+    restoredCount += 1;
+    return {
+      ...account,
+      isActive: true,
+      disabledAt: undefined,
+      disabledUntil: undefined,
+      disabledReason: undefined,
+      disabledType: undefined,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+
+  if (restoredCount > 0) {
+    accounts = refreshedAccounts;
+    await writeParquetRows(FB_ACCOUNTS_PARQUET_PATH, fbAccountsSchema, refreshedAccounts);
+    await appendLog({
+      level: "info",
+      message:
+        restoredCount === 1
+          ? "Automatic posting pause expired for 1 account. It has been re-enabled and returned to the active pool."
+          : `Automatic posting pauses expired for ${restoredCount} account(s). They have been re-enabled and returned to the active pool.`,
+    });
+  }
+
+  const activeAccounts = accounts.filter((account) => account.isActive !== false);
+  const activeGroups = groups.filter((group) => group.isActive !== false);
 
   if (activeAccounts.length === 0 || activeGroups.length === 0) {
+    const diagnostics = [
+      `accounts active/total=${activeAccounts.length}/${accounts.length}`,
+      `groups active/total=${activeGroups.length}/${groups.length}`,
+      activeAccounts.length === 0 && accounts.length > 0
+        ? "all accounts are disabled in Accounts page"
+        : undefined,
+      activeGroups.length === 0 && groups.length > 0
+        ? "all groups are disabled in Groups page"
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
     await appendLog({
       level: "info",
       message: "No active accounts or groups found for automation.",
+      details: diagnostics || undefined,
     });
     return STOPPED_POLL_INTERVAL_MS;
   }
 
   const selectedAccountsById = new Map<string, FbAccountRecord>();
   for (let index = 0; index < activeGroups.length; index += 1) {
-    const mapped = getMappedAccountForGroup(activeGroups[index], activeAccounts, index);
-    selectedAccountsById.set(mapped.id, mapped);
+    const mappedAccounts = getMappedAccountsForGroup(activeGroups[index], activeAccounts, index);
+    for (const mapped of mappedAccounts) {
+      selectedAccountsById.set(mapped.id, mapped);
+    }
   }
 
   const selectedAccounts = Array.from(selectedAccountsById.values());
@@ -3261,6 +3826,13 @@ async function runCycle(): Promise<number> {
   );
   const maxParallelAccounts = Math.max(1, automation.settings.parallelAccounts);
   const activeCycleAccounts = availableSelectedAccounts.slice(0, maxParallelAccounts);
+
+  if (isFreshAutomationStart && selectedAccounts.length < maxParallelAccounts) {
+    await appendLog({
+      level: "info",
+      message: `parallelAccounts is set to ${maxParallelAccounts}, but only ${selectedAccounts.length} selected account(s) are assigned to active groups. Effective parallel browsers are capped by selected assigned accounts.`,
+    });
+  }
 
   for (const account of selectedAccounts) {
     const remainingMs = getAccountCooldownRemainingMs(account.id);
@@ -3297,6 +3869,11 @@ async function runCycle(): Promise<number> {
       level: "info",
       message: `Automation selection ready: ${activeCycleAccounts.length}/${selectedAccounts.length} account(s) active this cycle (limit=${maxParallelAccounts}), ${activeGroups.length} group(s).`,
     });
+
+    await appendLog({
+      level: "info",
+      message: `Selected account pool: ${selectedAccounts.map((account) => account.name).join(", ") || "none"}.`,
+    });
   }
 
   if (availableSelectedAccounts.length > activeCycleAccounts.length) {
@@ -3324,7 +3901,7 @@ async function runCycle(): Promise<number> {
         continue;
       }
 
-      const ready = await preflightAccountSession(account);
+      const ready = await preflightAccountSession(account, automation.settings);
       if (ready) {
         readyAccountSessions.add(account.id);
       } else {
@@ -3342,77 +3919,208 @@ async function runCycle(): Promise<number> {
     return STOPPED_POLL_INTERVAL_MS;
   }
 
+  let remainingSessionQuota = Math.max(1, automation.settings.postsPerSession);
+  const reserveSessionQuota = (requested: number): number => {
+    if (remainingSessionQuota <= 0) {
+      return 0;
+    }
+
+    const granted = Math.min(remainingSessionQuota, Math.max(0, requested));
+    remainingSessionQuota -= granted;
+    return granted;
+  };
+  const releaseSessionQuota = (count: number): void => {
+    if (count <= 0) {
+      return;
+    }
+
+    remainingSessionQuota += count;
+  };
+
+  const accountSwitchDelayMs = automation.settings.delayBetweenAccountsMinutes * 60_000;
   const activeCycleAccountIds = new Set(activeCycleAccounts.map((account) => account.id));
 
-  const accountSwitchDelayMs =
-    automation.settings.delayBetweenAccountsMinutes * 60_000;
+  const mappedGroups = activeGroups
+    .map((group, index) => {
+      const mappedAccounts = getMappedAccountsForGroup(group, activeAccounts, index);
+      const eligibleCandidates = mappedAccounts.filter((candidate) => activeCycleAccountIds.has(candidate.id));
+      return {
+        group,
+        eligibleCandidates,
+      };
+    })
+    .filter((entry) => entry.eligibleCandidates.length > 0);
 
-  for (let index = 0; index < activeGroups.length; index += 1) {
-    if (!(await isAutomationRunning())) {
-      await appendLog({
-        level: "info",
-        message: "Automation stop requested. Ending current worker cycle.",
-      });
-      break;
-    }
+  await Promise.all(
+    activeCycleAccounts.map(async (account) => {
+      const dashboardEnabled = await isAccountEnabledInDashboard(account.id).catch(() => false);
+      if (!dashboardEnabled) {
+        readyAccountSessions.delete(account.id);
+        return;
+      }
 
-    const group = activeGroups[index];
-    const account = getMappedAccountForGroup(group, activeAccounts, index);
+      if (!readyAccountSessions.has(account.id)) {
+        return;
+      }
 
-    if (!activeCycleAccountIds.has(account.id)) {
-      continue;
-    }
+      const eligibleGroups = mappedGroups.filter((entry) =>
+        entry.eligibleCandidates.some((candidate) => candidate.id === account.id)
+      );
 
-    const dashboardEnabled = await isAccountEnabledInDashboard(account.id).catch(() => false);
-    if (!dashboardEnabled) {
-      readyAccountSessions.delete(account.id);
-      await appendLog({
-        level: "info",
-        message: `Skipping group ${group.groupId} because account ${account.name} is disabled in dashboard.`,
-        accountId: account.id,
-        groupId: group.id,
-      });
-      continue;
-    }
+      if (eligibleGroups.length === 0) {
+        await appendLog({
+          level: "info",
+          message: `Account ${account.name} has no eligible assigned groups in this cycle.`,
+          accountId: account.id,
+        });
+        return;
+      }
 
-    const cooldownRemainingMs = getAccountCooldownRemainingMs(account.id);
-    if (cooldownRemainingMs > 0) {
-      await appendLog({
-        level: "info",
-        message: `Skipping group ${group.groupId} because account ${account.name} is cooling down (${Math.ceil(
-          cooldownRemainingMs / 60_000
-        )} minute(s) remaining).`,
-        accountId: account.id,
-        groupId: group.id,
-      });
-      continue;
-    }
+      let remainingAccountQuota = automation.settings.maxPostsPerAccountPerCycle;
+      let postedByAccount = 0;
+      let nextGroupIndex = accountGroupCursor.get(account.id) ?? 0;
 
-    if (!readyAccountSessions.has(account.id)) {
-      await appendLog({
-        level: "error",
-        message: `Skipping group ${group.groupId} because account ${account.name} is not session-ready.`,
-        accountId: account.id,
-        groupId: group.id,
-      });
-      continue;
-    }
+      while (remainingAccountQuota > 0 && remainingSessionQuota > 0) {
+        if (!(await isAutomationRunning())) {
+          await appendLog({
+            level: "info",
+            message: `Automation stop requested. Ending account cycle for ${account.name}.`,
+            accountId: account.id,
+          });
+          break;
+        }
 
-    try {
-      await processGroupPosts(group, account, automation.settings);
-    } catch (error) {
-      await appendLog({
-        level: "error",
-        message: `CSV processing failed for group ${group.groupId}`,
-        accountId: account.id,
-        groupId: group.id,
-        details: error instanceof Error ? error.stack ?? error.message : "Unknown CSV error",
-      });
-    }
+        const stillEnabled = await isAccountEnabledInDashboard(account.id).catch(() => false);
+        if (!stillEnabled) {
+          readyAccountSessions.delete(account.id);
+          await appendLog({
+            level: "info",
+            message: `Account ${account.name} became disabled during this cycle. Stopping account worker and moving to other accounts.`,
+            accountId: account.id,
+          });
+          break;
+        }
 
-    if (index < activeGroups.length - 1) {
-      await sleepWithStopCheck(accountSwitchDelayMs, "between groups");
-    }
+        const cooldownRemainingMs = getAccountCooldownRemainingMs(account.id);
+        if (cooldownRemainingMs > 0) {
+          await appendLog({
+            level: "info",
+            message: `Account ${account.name} entered cooldown during this cycle (${Math.ceil(
+              cooldownRemainingMs / 60_000
+            )} minute(s) remaining). Stopping account worker for now.`,
+            accountId: account.id,
+          });
+          break;
+        }
+
+        let postedInPass = 0;
+
+        for (let offset = 0; offset < eligibleGroups.length; offset += 1) {
+          if (remainingAccountQuota <= 0 || remainingSessionQuota <= 0) {
+            break;
+          }
+
+          const requestedSessionQuota = Math.min(
+            remainingAccountQuota,
+            automation.settings.postsPerGroup
+          );
+          const reservedSessionQuota = reserveSessionQuota(requestedSessionQuota);
+          if (reservedSessionQuota <= 0) {
+            remainingAccountQuota = 0;
+            break;
+          }
+
+          const entry = eligibleGroups[(nextGroupIndex + offset) % eligibleGroups.length];
+          try {
+            const groupResult = await processGroupPosts(
+              entry.group,
+              account,
+              automation.settings,
+              Math.min(remainingAccountQuota, reservedSessionQuota)
+            );
+
+            const unusedReservedQuota = reservedSessionQuota - groupResult.postedCount;
+            if (unusedReservedQuota > 0) {
+              releaseSessionQuota(unusedReservedQuota);
+            }
+
+            remainingAccountQuota -= groupResult.postedCount;
+            postedByAccount += groupResult.postedCount;
+            postedInPass += groupResult.postedCount;
+
+            if (groupResult.stopRequested) {
+              remainingAccountQuota = 0;
+              break;
+            }
+
+            const enabledAfterGroup = await isAccountEnabledInDashboard(account.id).catch(() => false);
+            if (!enabledAfterGroup) {
+              readyAccountSessions.delete(account.id);
+              remainingAccountQuota = 0;
+              await appendLog({
+                level: "info",
+                message: `Account ${account.name} was disabled after processing group ${entry.group.groupId}. Moving on to other accounts.`,
+                accountId: account.id,
+                groupId: entry.group.id,
+              });
+              break;
+            }
+
+            const cooldownAfterGroupMs = getAccountCooldownRemainingMs(account.id);
+            if (cooldownAfterGroupMs > 0) {
+              remainingAccountQuota = 0;
+              await appendLog({
+                level: "info",
+                message: `Account ${account.name} entered cooldown after group ${entry.group.groupId}. Moving on to other accounts.`,
+                accountId: account.id,
+                groupId: entry.group.id,
+              });
+              break;
+            }
+          } catch (error) {
+            releaseSessionQuota(reservedSessionQuota);
+            await appendLog({
+              level: "error",
+              message: `CSV processing failed for group ${entry.group.groupId}`,
+              accountId: account.id,
+              groupId: entry.group.id,
+              details: error instanceof Error ? error.stack ?? error.message : "Unknown CSV error",
+            });
+          }
+
+          if (
+            offset < eligibleGroups.length - 1 &&
+            remainingAccountQuota > 0 &&
+            remainingSessionQuota > 0
+          ) {
+            await sleepWithStopCheck(accountSwitchDelayMs, `between groups for account ${account.name}`);
+          }
+        }
+
+        nextGroupIndex = (nextGroupIndex + 1) % eligibleGroups.length;
+
+        if (postedInPass === 0) {
+          break;
+        }
+      }
+
+      accountGroupCursor.set(account.id, nextGroupIndex);
+
+      if (postedByAccount >= automation.settings.maxPostsPerAccountPerCycle) {
+        await appendLog({
+          level: "info",
+          message: `Account ${account.name} reached maxPostsPerAccountPerCycle=${automation.settings.maxPostsPerAccountPerCycle} for this cycle.`,
+          accountId: account.id,
+        });
+      }
+    })
+  );
+
+  if (remainingSessionQuota <= 0) {
+    await appendLog({
+      level: "info",
+      message: `Session post cap reached (${automation.settings.postsPerSession} posts). Cooling down for ${automation.settings.waitIntervalMinutes} minute(s) before next cycle.`,
+    });
   }
 
   return Math.max(10_000, automation.settings.waitIntervalMinutes * 60_000);

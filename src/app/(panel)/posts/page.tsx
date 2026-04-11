@@ -8,6 +8,8 @@ import {
   XMarkIcon,
 } from "@heroicons/react/24/outline";
 
+import { ModalShell } from "@/components/ui/modal-shell";
+
 type Group = { id: string; name?: string; groupId: string };
 
 type Post = {
@@ -356,8 +358,7 @@ export default function PostsPage() {
       )}
 
       {open ? (
-        <div className="app-modal-shell">
-          <div className="app-modal max-w-2xl">
+        <ModalShell className="max-w-2xl">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-2xl font-semibold">Add New Post</h2>
               <button onClick={() => setOpen(false)} className="btn-subtle inline-flex items-center justify-center">
@@ -397,13 +398,11 @@ export default function PostsPage() {
                 <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Save Post</button>
               </div>
             </form>
-          </div>
-        </div>
+        </ModalShell>
       ) : null}
 
       {bulkOpen ? (
-        <div className="app-modal-shell">
-          <div className="app-modal max-w-xl">
+        <ModalShell>
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-2xl font-semibold">Bulk Upload Posts</h2>
               <button onClick={() => setBulkOpen(false)} className="btn-subtle inline-flex items-center justify-center">
@@ -445,8 +444,7 @@ export default function PostsPage() {
                 <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Import CSV</button>
               </div>
             </form>
-          </div>
-        </div>
+        </ModalShell>
       ) : null}
     </section>
   );

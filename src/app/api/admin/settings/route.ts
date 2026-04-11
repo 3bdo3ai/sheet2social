@@ -15,6 +15,8 @@ export async function PUT(request: Request) {
     waitIntervalMinutes?: number;
     delayBetweenAccountsMinutes?: number;
     postsPerGroup?: number;
+    maxPostsPerAccountPerCycle?: number;
+    postsPerSession?: number;
     commentWithPostImage?: boolean;
     proxyRotationEnabled?: boolean;
   };
@@ -23,17 +25,21 @@ export async function PUT(request: Request) {
   const waitIntervalMinutes = Number(body.waitIntervalMinutes);
   const delayBetweenAccountsMinutes = Number(body.delayBetweenAccountsMinutes);
   const postsPerGroup = Number(body.postsPerGroup);
+  const maxPostsPerAccountPerCycle = Number(body.maxPostsPerAccountPerCycle);
+  const postsPerSession = Number(body.postsPerSession);
 
   if (
     !parallelAccounts ||
     !waitIntervalMinutes ||
     Number.isNaN(delayBetweenAccountsMinutes) ||
-    !postsPerGroup
+    !postsPerGroup ||
+    !maxPostsPerAccountPerCycle ||
+    !postsPerSession
   ) {
     return NextResponse.json(
       {
         error:
-          "parallelAccounts, waitIntervalMinutes, delayBetweenAccountsMinutes, and postsPerGroup are required",
+          "parallelAccounts, waitIntervalMinutes, delayBetweenAccountsMinutes, postsPerGroup, maxPostsPerAccountPerCycle, and postsPerSession are required",
       },
       { status: 400 }
     );
@@ -44,6 +50,8 @@ export async function PUT(request: Request) {
     waitIntervalMinutes,
     delayBetweenAccountsMinutes,
     postsPerGroup,
+    maxPostsPerAccountPerCycle,
+    postsPerSession,
     commentWithPostImage: body.commentWithPostImage ?? false,
     proxyRotationEnabled: body.proxyRotationEnabled,
   });

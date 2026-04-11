@@ -10,7 +10,7 @@
     "lint": "next lint",
     "worker:engine": "tsx worker/engine.ts",
     "worker:once": "tsx worker/engine.ts --once",
-    "worker:visible": "cross-env WORKER_VISIBLE_BROWSER=true WORKER_VISUAL_TRACE=true WORKER_SKIP_PREFLIGHT_IN_VISIBLE_MODE=true WORKER_DEBUG_BROWSER_HOLD_FAILURE_ONLY=true WORKER_DEBUG_BROWSER_HOLD_MS=15000 tsx worker/engine.ts",
+    "worker:visible": "cross-env WORKER_VISIBLE_BROWSER=true WORKER_VISUAL_TRACE=true WORKER_SKIP_PREFLIGHT_IN_VISIBLE_MODE=true WORKER_DEBUG_BROWSER_HOLD_FAILURE_ONLY=true WORKER_DEBUG_BROWSER_HOLD_MS=0 tsx worker/engine.ts",
     "comment:test": "tsx scripts/comment-test.ts"
   },
   "engines": {

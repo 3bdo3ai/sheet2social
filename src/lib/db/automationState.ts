@@ -10,6 +10,8 @@ export interface AutomationSettings {
   waitIntervalMinutes: number;
   delayBetweenAccountsMinutes: number;
   postsPerGroup: number;
+  maxPostsPerAccountPerCycle: number;
+  postsPerSession: number;
   commentWithPostImage: boolean;
   proxyRotationEnabled: boolean;
 }
@@ -29,6 +31,8 @@ const DEFAULT_AUTOMATION_STATE: AutomationStateRecord = {
     waitIntervalMinutes: 5,
     delayBetweenAccountsMinutes: 1,
     postsPerGroup: 1,
+    maxPostsPerAccountPerCycle: 10,
+    postsPerSession: 20,
     commentWithPostImage: false,
     proxyRotationEnabled: false,
   },
@@ -61,36 +65,77 @@ export async function readAutomationState(): Promise<AutomationStateRecord> {
     }
 
     const rawSettings = parsed.settings;
-    const hasValidSettings =
-      rawSettings &&
-      typeof rawSettings.waitIntervalMinutes === "number" &&
-      typeof rawSettings.delayBetweenAccountsMinutes === "number" &&
-      typeof rawSettings.postsPerGroup === "number" &&
-      typeof rawSettings.parallelAccounts === "number" &&
-      typeof rawSettings.commentWithPostImage === "boolean" &&
-      typeof rawSettings.proxyRotationEnabled === "boolean";
+    const normalizedParallelAccounts = Math.max(
+      1,
+      Math.floor(
+        typeof rawSettings?.parallelAccounts === "number"
+          ? rawSettings.parallelAccounts
+          : DEFAULT_AUTOMATION_STATE.settings.parallelAccounts
+      )
+    );
+    const normalizedWaitIntervalMinutes = Math.max(
+      1,
+      Math.floor(
+        typeof rawSettings?.waitIntervalMinutes === "number"
+          ? rawSettings.waitIntervalMinutes
+          : DEFAULT_AUTOMATION_STATE.settings.waitIntervalMinutes
+      )
+    );
+    const normalizedDelayBetweenAccountsMinutes = Math.max(
+      0,
+      Math.floor(
+        typeof rawSettings?.delayBetweenAccountsMinutes === "number"
+          ? rawSettings.delayBetweenAccountsMinutes
+          : DEFAULT_AUTOMATION_STATE.settings.delayBetweenAccountsMinutes
+      )
+    );
+    const normalizedPostsPerGroup = Math.max(
+      1,
+      Math.floor(
+        typeof rawSettings?.postsPerGroup === "number"
+          ? rawSettings.postsPerGroup
+          : DEFAULT_AUTOMATION_STATE.settings.postsPerGroup
+      )
+    );
+    const normalizedMaxPostsPerAccountPerCycle = Math.max(
+      1,
+      Math.floor(
+        typeof rawSettings?.maxPostsPerAccountPerCycle === "number"
+          ? rawSettings.maxPostsPerAccountPerCycle
+          : DEFAULT_AUTOMATION_STATE.settings.maxPostsPerAccountPerCycle
+      )
+    );
+    const fallbackPostsPerSession =
+      normalizedParallelAccounts * normalizedMaxPostsPerAccountPerCycle;
 
     return {
       state: parsed.state,
-      settings: hasValidSettings
-        ? {
-            waitIntervalMinutes: Math.max(
-              1,
-              Math.floor(rawSettings.waitIntervalMinutes)
-            ),
-            delayBetweenAccountsMinutes: Math.max(
-              0,
-              Math.floor(rawSettings.delayBetweenAccountsMinutes)
-            ),
-            postsPerGroup: Math.max(1, Math.floor(rawSettings.postsPerGroup)),
-            parallelAccounts: Math.max(
-              1,
-              Math.floor(rawSettings.parallelAccounts)
-            ),
-            commentWithPostImage: rawSettings.commentWithPostImage,
-            proxyRotationEnabled: rawSettings.proxyRotationEnabled,
-          }
-        : DEFAULT_AUTOMATION_STATE.settings,
+      settings:
+        rawSettings && typeof rawSettings === "object"
+          ? {
+              parallelAccounts: normalizedParallelAccounts,
+              waitIntervalMinutes: normalizedWaitIntervalMinutes,
+              delayBetweenAccountsMinutes: normalizedDelayBetweenAccountsMinutes,
+              postsPerGroup: normalizedPostsPerGroup,
+              maxPostsPerAccountPerCycle: normalizedMaxPostsPerAccountPerCycle,
+              postsPerSession: Math.max(
+                1,
+                Math.floor(
+                  typeof rawSettings.postsPerSession === "number"
+                    ? rawSettings.postsPerSession
+                    : fallbackPostsPerSession
+                )
+              ),
+              commentWithPostImage:
+                typeof rawSettings.commentWithPostImage === "boolean"
+                  ? rawSettings.commentWithPostImage
+                  : DEFAULT_AUTOMATION_STATE.settings.commentWithPostImage,
+              proxyRotationEnabled:
+                typeof rawSettings.proxyRotationEnabled === "boolean"
+                  ? rawSettings.proxyRotationEnabled
+                  : DEFAULT_AUTOMATION_STATE.settings.proxyRotationEnabled,
+            }
+          : DEFAULT_AUTOMATION_STATE.settings,
       updatedAt: parsed.updatedAt ?? DEFAULT_AUTOMATION_STATE.updatedAt,
     };
   } catch {
@@ -123,11 +168,20 @@ export async function writeAutomationSettings(
   await ensureStorageDir();
 
   const current = await readAutomationState();
+  const parallelAccounts = Math.max(
+    1,
+    Math.floor(settings.parallelAccounts ?? current.settings.parallelAccounts)
+  );
+  const maxPostsPerAccountPerCycle = Math.max(
+    1,
+    Math.floor(
+      settings.maxPostsPerAccountPerCycle ??
+        current.settings.maxPostsPerAccountPerCycle
+    )
+  );
+
   const nextSettings: AutomationSettings = {
-    parallelAccounts: Math.max(
-      1,
-      Math.floor(settings.parallelAccounts ?? current.settings.parallelAccounts)
-    ),
+    parallelAccounts,
     waitIntervalMinutes: Math.max(
       1,
       Math.floor(
@@ -144,6 +198,15 @@ export async function writeAutomationSettings(
     postsPerGroup: Math.max(
       1,
       Math.floor(settings.postsPerGroup ?? current.settings.postsPerGroup)
+    ),
+    maxPostsPerAccountPerCycle,
+    postsPerSession: Math.max(
+      1,
+      Math.floor(
+        settings.postsPerSession ??
+          current.settings.postsPerSession ??
+          parallelAccounts * maxPostsPerAccountPerCycle
+      )
     ),
     commentWithPostImage:
       settings.commentWithPostImage ?? current.settings.commentWithPostImage,

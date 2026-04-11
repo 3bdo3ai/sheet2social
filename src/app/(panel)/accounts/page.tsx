@@ -3,6 +3,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import { EyeIcon, EyeSlashIcon, PlusIcon, XMarkIcon } from "@heroicons/react/24/outline";
 
+import { ModalShell } from "@/components/ui/modal-shell";
+
 type Account = {
   id: string;
   name: string;
@@ -18,6 +20,10 @@ type Account = {
   postFilter?: string;
   postingMethod?: string;
   isActive: boolean;
+  disabledAt?: string;
+  disabledUntil?: string;
+  disabledReason?: string;
+  disabledType?: "manual" | "automatic";
   createdAt?: string;
   updatedAt?: string;
 };
@@ -310,6 +316,15 @@ export default function AccountsPage() {
     setEditingAccount(account);
     setCookieText("");
     setCookieLoading(false);
+  }
+
+  function formatDateTime(value?: string) {
+    if (!value) {
+      return "Unknown";
+    }
+
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
   }
 
   async function loadAccountCookies(accountId: string) {
@@ -774,7 +789,38 @@ export default function AccountsPage() {
                 >
                   {sessionState[item.id] ? "Logged In" : "Not Logged In"}
                 </span>
+                {!item.isActive && (
+                  <span className={`status-chip ml-2 ${item.disabledType === "automatic" ? "bg-amber-900 text-amber-100" : "bg-red-900 text-red-100"}`}>
+                    {item.disabledType === "automatic" && item.disabledUntil
+                      ? `Paused until ${formatDateTime(item.disabledUntil)}`
+                      : "Disabled"}
+                  </span>
+                )}
               </div>
+
+              {!item.isActive && item.disabledAt && (
+                <div className="mt-3 rounded-lg border border-red-800 bg-red-950 p-3 text-xs text-red-100">
+                  <p className="font-semibold">
+                    {item.disabledType === "automatic" ? "Paused automatically" : "Disabled manually"}
+                  </p>
+                  <p className="mt-1">
+                    <strong>Reason:</strong> {item.disabledReason || "No reason recorded"}
+                  </p>
+                  <p className="mt-1">
+                    <strong>Disabled at:</strong> {formatDateTime(item.disabledAt)}
+                  </p>
+                  {item.disabledUntil ? (
+                    <p className="mt-1">
+                      <strong>Re-enable at:</strong> {formatDateTime(item.disabledUntil)}
+                    </p>
+                  ) : null}
+                  {item.disabledType === "automatic" && item.disabledUntil ? (
+                    <p className="mt-1 text-amber-200">
+                      The worker will return this account to the active pool automatically when the pause ends.
+                    </p>
+                  ) : null}
+                </div>
+              )}
 
               {loginActivityState[item.id]?.proxyPublicIp ? (
                 <p className="mt-2 text-xs text-[#8fd6ff]">
@@ -1187,8 +1233,7 @@ function EmptyState({ text, actionText, onClick }: { text: string; actionText: s
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
-    <div className="app-modal-shell">
-      <div className="app-modal max-w-xl">
+    <ModalShell>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-2xl font-semibold">{title}</h2>
           <button onClick={onClose} className="btn-subtle inline-flex items-center justify-center">
@@ -1196,7 +1241,6 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
           </button>
         </div>
         {children}
-      </div>
-    </div>
+    </ModalShell>
   );
 }

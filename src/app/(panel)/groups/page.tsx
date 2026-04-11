@@ -3,11 +3,14 @@
 import { FormEvent, useEffect, useState } from "react";
 import { PlusIcon, XMarkIcon } from "@heroicons/react/24/outline";
 
+import { ModalShell } from "@/components/ui/modal-shell";
+
 type Group = {
   id: string;
   groupId: string;
   name?: string;
   fbAccountId?: string;
+  fbAccountIds?: string[];
   csvPath: string;
   isActive?: boolean;
 };
@@ -17,6 +20,8 @@ type Account = { id: string; name: string };
 export default function GroupsPage() {
   const [items, setItems] = useState<Group[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [assignmentSearchByGroupId, setAssignmentSearchByGroupId] = useState<Record<string, string>>({});
+  const [addGroupAccountSearch, setAddGroupAccountSearch] = useState("");
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [assignmentFilter, setAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
@@ -29,7 +34,23 @@ export default function GroupsPage() {
       fetch("/api/admin/fb-accounts"),
     ]);
 
-    setItems((await groupsRes.json()) as Group[]);
+    const groupsPayload = (await groupsRes.json()) as Group[];
+    setItems(
+      groupsPayload.map((group) => {
+        const ids = Array.isArray(group.fbAccountIds)
+          ? group.fbAccountIds
+          : String(group.fbAccountId ?? "")
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean);
+
+        return {
+          ...group,
+          fbAccountIds: ids,
+          fbAccountId: ids[0],
+        };
+      })
+    );
     setAccounts((await accountsRes.json()) as Account[]);
   }
 
@@ -51,14 +72,47 @@ export default function GroupsPage() {
     await loadItems();
   }
 
-  async function assignAccount(groupId: string, fbAccountId: string) {
+  async function assignAccounts(groupId: string, fbAccountIds: string[]) {
     await fetch("/api/admin/fb-groups", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: groupId, fbAccountId: fbAccountId || undefined }),
+      body: JSON.stringify({ id: groupId, fbAccountIds }),
     });
 
     await loadItems();
+  }
+
+  async function moveAssignedAccount(groupId: string, accountId: string, direction: "up" | "down") {
+    const group = items.find((item) => item.id === groupId);
+    if (!group) {
+      return;
+    }
+
+    const current = [...(group.fbAccountIds ?? [])];
+    const index = current.indexOf(accountId);
+    if (index < 0) {
+      return;
+    }
+
+    const targetIndex = direction === "up" ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= current.length) {
+      return;
+    }
+
+    const swapped = [...current];
+    const [selected] = swapped.splice(index, 1);
+    swapped.splice(targetIndex, 0, selected);
+    await assignAccounts(groupId, swapped);
+  }
+
+  async function removeAssignedAccount(groupId: string, accountId: string) {
+    const group = items.find((item) => item.id === groupId);
+    if (!group) {
+      return;
+    }
+
+    const filtered = (group.fbAccountIds ?? []).filter((id) => id !== accountId);
+    await assignAccounts(groupId, filtered);
   }
 
   async function toggleActive(groupId: string, isActive: boolean) {
@@ -133,12 +187,12 @@ export default function GroupsPage() {
       assignmentFilter === "all"
         ? true
         : assignmentFilter === "assigned"
-          ? Boolean(item.fbAccountId)
-          : !item.fbAccountId;
+          ? Boolean(item.fbAccountIds?.length)
+          : !item.fbAccountIds?.length;
     return byText && byAssignment;
   });
 
-  const assignedCount = items.filter((item) => Boolean(item.fbAccountId)).length;
+  const assignedCount = items.filter((item) => Boolean(item.fbAccountIds?.length)).length;
   const unassignedCount = items.length - assignedCount;
   const coverage = items.length > 0 ? Math.round((assignedCount / items.length) * 100) : 0;
 
@@ -204,33 +258,114 @@ export default function GroupsPage() {
               <p className="text-sm text-[#b2c5e3]">Group ID: {item.groupId}</p>
               <p className="text-sm text-[#8ea8cd]">CSV: {item.csvPath}</p>
               <div className="mt-2">
-                <span className={`status-chip ${item.fbAccountId ? "status-running" : "status-stopped"}`}>
-                  {item.fbAccountId ? "Assigned" : "Unassigned"}
+                <span className={`status-chip ${item.fbAccountIds?.length ? "status-running" : "status-stopped"}`}>
+                  {item.fbAccountIds?.length ? `Assigned (${item.fbAccountIds.length})` : "Unassigned"}
+                </span>
+                <span className={`status-chip ml-2 ${(item.isActive ?? true) ? "status-running" : "status-stopped"}`}>
+                  {(item.isActive ?? true) ? "Active" : "Inactive"}
                 </span>
               </div>
 
+              {item.fbAccountIds && item.fbAccountIds.length > 0 ? (
+                <p className="mt-2 text-xs text-[#9fb4d5]">
+                  Accounts: {item.fbAccountIds
+                    .map((id) => accounts.find((account) => account.id === id)?.name ?? id)
+                    .join(", ")}
+                </p>
+              ) : null}
+
               <label className="mt-3 grid max-w-md gap-1 text-sm">
-                <span className="app-label">Assigned Account</span>
+                <span className="app-label">Assigned Accounts</span>
+                <input
+                  value={assignmentSearchByGroupId[item.id] ?? ""}
+                  onChange={(event) =>
+                    setAssignmentSearchByGroupId((prev) => ({
+                      ...prev,
+                      [item.id]: event.target.value,
+                    }))
+                  }
+                  placeholder="Search accounts in this group..."
+                  className="modal-input"
+                />
                 <select
-                  value={item.fbAccountId || ""}
-                  onChange={(event) => assignAccount(item.id, event.target.value)}
+                  multiple
+                  value={item.fbAccountIds || []}
+                  onChange={(event) => {
+                    const selected = Array.from(event.currentTarget.selectedOptions).map((option) => option.value);
+                    void assignAccounts(item.id, selected);
+                  }}
                   className="modal-input"
                 >
-                  <option value="">No groups assigned</option>
-                  {accounts.map((account) => (
+                  {accounts
+                    .filter((account) => {
+                      const query = (assignmentSearchByGroupId[item.id] ?? "").trim().toLowerCase();
+                      if (!query) {
+                        return true;
+                      }
+
+                      return account.name.toLowerCase().includes(query);
+                    })
+                    .map((account) => (
                     <option key={account.id} value={account.id}>
                       {account.name}
                     </option>
                   ))}
                 </select>
+                <span className="text-xs text-[#8ea8cd]">Hold Ctrl/Cmd to select multiple accounts.</span>
               </label>
+
+              {item.fbAccountIds && item.fbAccountIds.length > 0 ? (
+                <div className="mt-3 max-w-2xl rounded-lg border border-[var(--border)] bg-[#0f1f3a] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#9ec5ef]">
+                    Account Priority (automation tries top first)
+                  </p>
+                  <div className="mt-2 space-y-2">
+                    {item.fbAccountIds.map((accountId, index) => {
+                      const accountName = accounts.find((account) => account.id === accountId)?.name ?? accountId;
+                      const isFirst = index === 0;
+                      const isLast = index === item.fbAccountIds!.length - 1;
+
+                      return (
+                        <div key={`${item.id}-${accountId}`} className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[#10223f] px-3 py-2 text-sm">
+                          <span className="text-[#d9e9ff]">{index + 1}. {accountName}</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => moveAssignedAccount(item.id, accountId, "up")}
+                              disabled={isFirst}
+                              className="btn-subtle px-2 py-1 text-xs disabled:opacity-50"
+                            >
+                              Up
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => moveAssignedAccount(item.id, accountId, "down")}
+                              disabled={isLast}
+                              className="btn-subtle px-2 py-1 text-xs disabled:opacity-50"
+                            >
+                              Down
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removeAssignedAccount(item.id, accountId)}
+                              className="btn-subtle px-2 py-1 text-xs text-[#ffc2cc]"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
 
               <div className="mt-3">
                 <button
                   onClick={() => toggleActive(item.id, item.isActive ?? true)}
                   className="btn-subtle mr-2 text-xs"
                 >
-                  Toggle Active
+                  {(item.isActive ?? true) ? "Disable Group" : "Enable Group"}
                 </button>
                 <button
                   onClick={() => deleteGroup(item.id)}
@@ -251,8 +386,7 @@ export default function GroupsPage() {
       )}
 
       {open ? (
-        <div className="app-modal-shell">
-          <div className="app-modal max-w-xl">
+        <ModalShell>
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-2xl font-semibold">Add New Group</h2>
               <button onClick={() => setOpen(false)} className="btn-subtle inline-flex items-center justify-center">
@@ -262,25 +396,38 @@ export default function GroupsPage() {
             <form onSubmit={addGroup} className="grid gap-3">
               <input name="groupId" required placeholder="Group ID" className="modal-input" />
               <input name="name" placeholder="Group Name" className="modal-input" />
-              <select name="fbAccountId" className="modal-input">
-                <option value="">Select account (optional)</option>
-                {accounts.map((account) => (
+              <input
+                value={addGroupAccountSearch}
+                onChange={(event) => setAddGroupAccountSearch(event.target.value)}
+                placeholder="Search accounts..."
+                className="modal-input"
+              />
+              <select name="fbAccountIds" multiple className="modal-input">
+                {accounts
+                  .filter((account) => {
+                    const query = addGroupAccountSearch.trim().toLowerCase();
+                    if (!query) {
+                      return true;
+                    }
+
+                    return account.name.toLowerCase().includes(query);
+                  })
+                  .map((account) => (
                   <option key={account.id} value={account.id}>{account.name}</option>
                 ))}
               </select>
+              <p className="text-xs text-[#8ea8cd]">Hold Ctrl/Cmd to assign multiple accounts to this group.</p>
               <input name="csv" type="file" accept=".csv" className="modal-input" />
               <div className="mt-2 flex justify-end gap-2">
                 <button type="button" onClick={() => setOpen(false)} className="btn-subtle">Cancel</button>
                 <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Save Group</button>
               </div>
             </form>
-          </div>
-        </div>
+        </ModalShell>
       ) : null}
 
       {bulkOpen ? (
-        <div className="app-modal-shell">
-          <div className="app-modal max-w-xl">
+        <ModalShell>
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-2xl font-semibold">Bulk Upload Groups</h2>
               <button onClick={() => setBulkOpen(false)} className="btn-subtle inline-flex items-center justify-center">
@@ -307,8 +454,7 @@ export default function GroupsPage() {
                 <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Import CSV</button>
               </div>
             </form>
-          </div>
-        </div>
+        </ModalShell>
       ) : null}
     </section>
   );

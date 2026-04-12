@@ -314,6 +314,7 @@ export default function AutomationPage() {
   const [liveRefresh, setLiveRefresh] = useState(true);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isRestarting, setIsRestarting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement | null>(null);
   const transitionStartedAtRef = useRef<number>(0);
@@ -552,6 +553,36 @@ export default function AutomationPage() {
     }
   }
 
+  async function restartAutomation() {
+    if (isStateMutating || isRestarting) {
+      return;
+    }
+
+    setIsRestarting(true);
+    transitionStartedAtRef.current = Date.now();
+    setPendingState("running");
+    setRequestError(null);
+
+    try {
+      const response = await fetch("/api/admin/automation/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to restart automation");
+      }
+
+      await loadData({ silent: true });
+    } catch (error) {
+      setPendingState(null);
+      setRequestError(error instanceof Error ? error.message : "Unknown automation-restart error");
+      await loadData({ silent: true });
+    } finally {
+      setIsRestarting(false);
+    }
+  }
+
   return (
     <section className="space-y-5 animate-reveal-up">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -592,11 +623,12 @@ export default function AutomationPage() {
             Stop
           </button>
           <button
-            onClick={() => void loadData({ silent: true })}
-            className="btn-subtle inline-flex items-center gap-1.5 text-xs"
+            onClick={() => void restartAutomation()}
+            disabled={isStateMutating || isRestarting}
+            className="btn-subtle inline-flex items-center gap-1.5 text-xs disabled:opacity-60"
           >
-            <ArrowPathIcon className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
-            Refresh
+            <ArrowPathIcon className={`h-4 w-4 ${isRefreshing || isRestarting ? "animate-spin" : ""}`} />
+            {isRestarting ? "Restarting..." : "Refresh / Restart"}
           </button>
         </div>
       </div>

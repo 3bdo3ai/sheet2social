@@ -33,6 +33,10 @@ function forwardWithFilter(stream, targetWrite) {
   });
 }
 
+let shuttingDown = false;
+let workerProcess = null;
+let workerRestartAttempts = 0;
+
 const child = spawn(process.execPath, [nextBin, ...args], {
   env: process.env,
   stdio: ['inherit', 'pipe', 'pipe'],
@@ -42,6 +46,11 @@ forwardWithFilter(child.stdout, (text) => process.stdout.write(text));
 forwardWithFilter(child.stderr, (text) => process.stderr.write(text));
 
 child.on('close', (code, signal) => {
+  shuttingDown = true;
+  if (workerProcess && !workerProcess.killed) {
+    workerProcess.kill('SIGTERM');
+  }
+
   if (signal) {
     process.kill(process.pid, signal);
     return;
@@ -72,17 +81,64 @@ if (args[0] === 'dev' || args[0] === 'start') {
     }
   }
 
-  console.log(
-    `[worker-launcher] Starting ${workerScript} (${useVisibleWorker ? 'debug Chrome view enabled' : 'headless mode'})`
-  );
+  const startWorker = () => {
+    if (shuttingDown) {
+      return;
+    }
 
-  const workerProcess = spawn('npm', ['run', workerScript], {
-    env: workerEnv,
-    stdio: 'inherit',
-    shell: true,
-  });
+    console.log(
+      `[worker-launcher] Starting ${workerScript} (${useVisibleWorker ? 'debug Chrome view enabled' : 'headless mode'})`
+    );
 
-  workerProcess.on('error', (err) => {
-    console.error(`Failed to start worker process: ${err}`);
-  });
+    const startedAt = Date.now();
+    workerProcess = spawn('npm', ['run', workerScript], {
+      env: workerEnv,
+      stdio: 'inherit',
+      shell: true,
+    });
+
+    workerProcess.on('error', (err) => {
+      console.error(`Failed to start worker process: ${err}`);
+    });
+
+    workerProcess.on('close', (code, signal) => {
+      if (shuttingDown) {
+        return;
+      }
+
+      const runtimeMs = Date.now() - startedAt;
+      if (runtimeMs > 30_000) {
+        workerRestartAttempts = 0;
+      }
+
+      workerRestartAttempts += 1;
+      const delayMs = Math.min(8_000, 1_000 * workerRestartAttempts);
+
+      console.warn(
+        `[worker-launcher] Worker exited (code=${code ?? 'null'}, signal=${signal ?? 'null'}). Restarting in ${delayMs}ms...`
+      );
+
+      setTimeout(() => {
+        startWorker();
+      }, delayMs);
+    });
+  };
+
+  const shutdown = () => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    if (workerProcess && !workerProcess.killed) {
+      workerProcess.kill('SIGTERM');
+    }
+    if (!child.killed) {
+      child.kill('SIGTERM');
+    }
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  startWorker();
 }

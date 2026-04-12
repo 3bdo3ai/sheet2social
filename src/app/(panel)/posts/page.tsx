@@ -31,6 +31,15 @@ function isCompletedPostStatus(status: string): boolean {
   return normalized === "posted" || normalized === "done" || normalized === "completed" || normalized === "success";
 }
 
+function imageUrlPreview(url: string, maxLength = 84): string {
+  const normalized = url.trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
 export default function PostsPage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
@@ -41,6 +50,7 @@ export default function PostsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editPostText, setEditPostText] = useState("");
+  const [editImageUrl, setEditImageUrl] = useState("");
   const [editCommentLink, setEditCommentLink] = useState("");
   const [editStatus, setEditStatus] = useState("");
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -81,6 +91,7 @@ export default function PostsPage() {
   function startEdit(post: Post) {
     setEditingId(post.id);
     setEditPostText(post.post_text);
+    setEditImageUrl(post.image_url || "");
     setEditCommentLink(post.comment_link || "");
     setEditStatus(post.status || "");
   }
@@ -92,6 +103,7 @@ export default function PostsPage() {
       body: JSON.stringify({
         id,
         postText: editPostText,
+        imageUrl: editImageUrl,
         commentLink: editCommentLink,
         status: editStatus,
       }),
@@ -115,6 +127,7 @@ export default function PostsPage() {
     const form = new FormData();
     form.set("groupId", post.groupId);
     form.set("postText", post.post_text);
+    form.set("imageUrl", post.image_url || "");
     form.set("addComment", String(Boolean(post.comment_link)));
     form.set("commentLink", post.comment_link || "");
 
@@ -175,7 +188,7 @@ export default function PostsPage() {
   const normalizedSearch = search.trim().toLowerCase();
   const filteredPosts = posts.filter((post) => {
     const bySearch = normalizedSearch
-      ? [post.groupLabel, post.post_text, post.comment_link, post.status]
+      ? [post.groupLabel, post.post_text, post.image_url, post.comment_link, post.status]
           .filter(Boolean)
           .join(" ")
           .toLowerCase()
@@ -258,6 +271,7 @@ export default function PostsPage() {
               <tr>
                 <th className="px-4 py-3">Group</th>
                 <th className="px-4 py-3">Caption</th>
+                <th className="px-4 py-3">Image URL</th>
                 <th className="px-4 py-3">Comment</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Actions</th>
@@ -277,6 +291,28 @@ export default function PostsPage() {
                       />
                     ) : (
                       <p className="truncate">{post.post_text}</p>
+                    )}
+                  </td>
+                  <td className="w-[280px] max-w-[280px] px-4 py-3">
+                    {editingId === post.id ? (
+                      <input
+                        value={editImageUrl}
+                        onChange={(event) => setEditImageUrl(event.target.value)}
+                        className="modal-input"
+                        placeholder="https://..."
+                      />
+                    ) : post.image_url ? (
+                      <a
+                        href={post.image_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block max-w-[280px] truncate text-[#8fd0ff] underline-offset-2 hover:underline"
+                        title={post.image_url}
+                      >
+                        {imageUrlPreview(post.image_url)}
+                      </a>
+                    ) : (
+                      <p className="truncate">-</p>
                     )}
                   </td>
                   <td className="max-w-[280px] px-4 py-3">
@@ -347,7 +383,7 @@ export default function PostsPage() {
               ))}
               {filteredPosts.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-6 text-center text-[#9fb4d5]">
+                  <td colSpan={6} className="px-4 py-6 text-center text-[#9fb4d5]">
                     No posts match current filters.
                   </td>
                 </tr>
@@ -380,6 +416,11 @@ export default function PostsPage() {
               <label className="grid gap-1 text-sm">
                 <span className="app-label">Images (optional)</span>
                 <input name="image" type="file" accept="image/*" className="modal-input" />
+              </label>
+
+              <label className="grid gap-1 text-sm">
+                <span className="app-label">Image URL (optional)</span>
+                <input name="imageUrl" type="url" placeholder="https://example.com/image.jpg" className="modal-input" />
               </label>
 
               <textarea name="postText" required rows={4} placeholder="Enter your post caption..." className="modal-input" />

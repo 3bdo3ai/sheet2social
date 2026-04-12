@@ -737,20 +737,12 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function stripNonBmpChars(value: string): string {
-  let result = "";
-  for (const char of value) {
-    const codePoint = char.codePointAt(0) ?? 0;
-    if (codePoint <= 0xffff) {
-      result += char;
-    }
-  }
-  return result;
-}
-
 function normalizeForComparison(value: string): string {
-  return stripNonBmpChars(normalizeWhitespace(value))
+  return normalizeWhitespace(value)
+    .normalize("NFKD")
     .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u064b-\u065f\u0670]/g, "")
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201c\u201d]/g, '"');
 }
@@ -847,27 +839,106 @@ async function appendVisualTraceLog(
   });
 }
 
-function toWebDriverSafeText(value: string): {
-  safeText: string;
-  removedNonBmp: boolean;
-} {
-  let removedNonBmp = false;
-  let safeText = "";
+async function setEditableText(
+  driver: WebDriver,
+  element: Awaited<ReturnType<WebDriver["findElement"]>>,
+  value: string
+): Promise<void> {
+  const normalizedValue = String(value ?? "").replace(/\r\n/g, "\n");
+  const expectedProbe = normalizeForComparison(normalizedValue).slice(0, Math.min(32, normalizedValue.length));
 
-  for (const char of value) {
-    const codePoint = char.codePointAt(0) ?? 0;
-    if (codePoint > 0xffff) {
-      removedNonBmp = true;
-      continue;
+  try {
+    await element.click().catch(() => undefined);
+    await element.sendKeys(Key.chord(Key.CONTROL, "a")).catch(() => undefined);
+    await element.sendKeys(Key.BACK_SPACE).catch(() => undefined);
+    if (normalizedValue) {
+      await element.sendKeys(normalizedValue);
     }
 
-    safeText += char;
+    const typedText = normalizeForComparison(
+      `${await element.getText()} ${(await element.getAttribute("textContent")) ?? ""}`
+    );
+
+    if (!expectedProbe || typedText.includes(expectedProbe)) {
+      return;
+    }
+  } catch {
+    // Fall back to JS write path if native typing fails.
   }
 
-  return {
-    safeText,
-    removedNonBmp,
-  };
+  await driver.executeScript(
+    `
+      const el = arguments[0];
+      const nextValue = String(arguments[1] ?? "");
+
+      const dispatchInputEvents = () => {
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      const contentEditableAttr = String(el.getAttribute?.("contenteditable") ?? "").toLowerCase();
+      const isContentEditable = Boolean(el.isContentEditable) || contentEditableAttr === "true";
+
+      if (typeof el.focus === "function") {
+        el.focus();
+      }
+
+      if (isContentEditable) {
+        const selection = window.getSelection();
+        if (selection) {
+          selection.removeAllRanges();
+          const clearRange = document.createRange();
+          clearRange.selectNodeContents(el);
+          selection.addRange(clearRange);
+        }
+
+        if (typeof document.execCommand === "function") {
+          try {
+            document.execCommand("selectAll", false);
+          } catch {
+            // Ignore unsupported command.
+          }
+          try {
+            document.execCommand("delete", false);
+          } catch {
+            // Ignore unsupported command.
+          }
+          try {
+            document.execCommand("insertText", false, nextValue);
+          } catch {
+            // Ignore unsupported command.
+          }
+        }
+
+        if ((el.textContent ?? "") !== nextValue) {
+          el.textContent = nextValue;
+        }
+
+        if (selection) {
+          const endRange = document.createRange();
+          endRange.selectNodeContents(el);
+          endRange.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(endRange);
+        }
+
+        dispatchInputEvents();
+        return;
+      }
+
+      if ("value" in el) {
+        el.value = nextValue;
+        dispatchInputEvents();
+        return;
+      }
+
+      el.textContent = nextValue;
+      dispatchInputEvents();
+    `,
+    element,
+    value
+  );
 }
 
 function createPostVerificationSnippet(postText: string): string {
@@ -1583,7 +1654,7 @@ async function waitForComposerTextbox(driver: WebDriver, timeoutMs: number) {
         const dialogText = normalizeForComparison(await dialog.getText());
         const dialogLabel = normalizeForComparison((await dialog.getAttribute("aria-label")) ?? "");
 
-        if (!dialogText.includes("create post") && dialogLabel !== "create post") {
+        if (!isComposerSurfaceText(dialogText) && !isComposerDialogLabel(dialogLabel)) {
           continue;
         }
 
@@ -1610,7 +1681,7 @@ async function waitForComposerTextbox(driver: WebDriver, timeoutMs: number) {
     await driver.sleep(250);
   }
 
-  throw new Error("Timed out waiting for the Create post composer textbox.");
+  throw new Error("Timed out waiting for the post composer textbox.");
 }
 
 async function waitForComposerToClose(driver: WebDriver, timeoutMs: number): Promise<boolean> {
@@ -1621,7 +1692,7 @@ async function waitForComposerToClose(driver: WebDriver, timeoutMs: number): Pro
         try {
           const dialogText = normalizeForComparison(await dialog.getText());
           const dialogLabel = normalizeForComparison((await dialog.getAttribute("aria-label")) ?? "");
-          if (dialogText.includes("create post") || dialogLabel === "create post") {
+          if (isComposerSurfaceText(dialogText) || isComposerDialogLabel(dialogLabel)) {
             return false;
           }
         } catch {
@@ -1636,45 +1707,354 @@ async function waitForComposerToClose(driver: WebDriver, timeoutMs: number): Pro
 }
 
 async function dismissAddToYourPostOverlay(driver: WebDriver): Promise<boolean> {
-  const overlayDialogs = await driver.findElements(
-    By.xpath(
-      "//div[@role='dialog'][@aria-label='Add to your post' or .//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add to your post')]]"
-    )
-  );
+  const dialogs = await driver.findElements(By.css("div[role='dialog']"));
 
-  if (overlayDialogs.length === 0) {
-    return false;
+  for (const dialog of dialogs) {
+    try {
+      if (!(await dialog.isDisplayed())) {
+        continue;
+      }
+
+      const dialogText = normalizeForComparison(await dialog.getText());
+      const dialogLabel = normalizeForComparison((await dialog.getAttribute("aria-label")) ?? "");
+
+      if (!isAddToPostOverlayText(`${dialogLabel} ${dialogText}`)) {
+        continue;
+      }
+
+      const composerTextboxes = await dialog.findElements(
+        By.css(
+          "div[role='textbox'][contenteditable='true'], [role='textbox'][contenteditable='true'], div[contenteditable='true'][data-lexical-editor='true']"
+        )
+      );
+      const hasVisibleComposerTextbox = await Promise.all(
+        composerTextboxes.map(async (textbox) => {
+          try {
+            return await textbox.isDisplayed();
+          } catch {
+            return false;
+          }
+        })
+      ).then((flags) => flags.some(Boolean));
+
+      // Main composer includes "add to your post" text; do not dismiss it.
+      if (hasVisibleComposerTextbox) {
+        continue;
+      }
+
+      const controls = await dialog.findElements(By.css("[role='button'], a[role='button'], button"));
+      for (const control of controls) {
+        try {
+          if (!(await control.isDisplayed())) {
+            continue;
+          }
+
+          const ariaLabel = normalizeForComparison((await control.getAttribute("aria-label")) ?? "");
+          const text = normalizeForComparison(await control.getText());
+          const controlLabel = `${ariaLabel} ${text}`;
+
+          if (!isBackControlText(controlLabel)) {
+            continue;
+          }
+
+          await control.click().catch(async () => {
+            await driver.executeScript("arguments[0].click();", control);
+          });
+
+          await driver.sleep(800);
+          return true;
+        } catch {
+          // Try next control if this one detached or is not interactable.
+        }
+      }
+    } catch {
+      // Ignore transient dialog updates.
+    }
   }
 
-  const topDialog = overlayDialogs[overlayDialogs.length - 1];
-  const backButtons = await topDialog.findElements(
-    By.xpath(
-      ".//*[@role='button'][@aria-label='Back'] | .//a[@aria-label='Back'] | .//*[contains(@aria-label, 'Back')]"
-    )
-  );
+  return false;
+}
 
-  if (backButtons.length === 0) {
-    return false;
-  }
+const COMPOSER_DIALOG_TERMS = [
+  "create post",
+  "create a post",
+  "create a public post",
+  "creer une publication",
+  "creer un post",
+  "enregistrer une publication",
+  "انشاء منشور",
+  "إنشاء منشور",
+];
 
-  try {
-    await backButtons[0].click();
-  } catch {
-    await driver.executeScript("arguments[0].click();", backButtons[0]).catch(() => undefined);
-  }
+const COMPOSER_SURFACE_TERMS = [
+  ...COMPOSER_DIALOG_TERMS,
+  "post anonymously",
+  "write something",
+  "whats on your mind",
+  "add to your post",
+  "exprimez-vous",
+  "ecrivez",
+  "publier de maniere anonyme",
+  "ajouter a votre publication",
+  "اكتب",
+  "اكتب شي",
+  "منشور مجهول الهوية",
+  "اضافة الى منشورك",
+  "إضافة إلى منشورك",
+];
 
-  await driver.sleep(800);
-  return true;
+const ADD_TO_POST_OVERLAY_TERMS = [
+  "add to your post",
+  "ajouter a votre publication",
+  "اضافة الى منشورك",
+  "إضافة إلى منشورك",
+];
+
+const BACK_CONTROL_TERMS = [
+  "back",
+  "retour",
+  "رجوع",
+  "عودة",
+];
+
+const BACK_OR_CLOSE_TERMS = [
+  "back",
+  "close",
+  "retour",
+  "fermer",
+  "رجوع",
+  "عودة",
+  "اغلاق",
+  "إغلاق",
+];
+
+const FILE_UPLOAD_ERROR_TERMS = [
+  "cant read files",
+  "your file cant be uploaded",
+  "your photos couldnt be uploaded",
+  "file cant be uploaded",
+  "couldnt be uploaded",
+  "fichiers illisibles",
+  "impossible dimporter vos photos",
+  "impossible dimporter votre fichier",
+  "impossible dimporter",
+  "photos nont pas pu etre importees",
+  "لا يمكن تحميل",
+  "تعذر تحميل",
+  "تعذر رفع",
+  "ملفات غير قابلة للقراءة",
+  "تعذر استيراد",
+];
+
+const FILE_UPLOAD_DISMISS_TERMS = [
+  "close",
+  "fermer",
+  "ok",
+  "okay",
+  "daccord",
+  "annuler",
+  "cancel",
+  "موافق",
+  "اغلاق",
+  "إغلاق",
+];
+
+const ATTACHMENT_REMOVE_TERMS = [
+  "remove photo",
+  "remove image",
+  "remove media",
+  "supprimer la photo",
+  "supprimer l image",
+  "supprimer l'image",
+  "supprimer",
+  "حذف الصورة",
+  "حذف",
+];
+
+function includesAny(haystack: string, terms: readonly string[]): boolean {
+  return terms.some((term) => haystack.includes(normalizeForComparison(term)));
+}
+
+function isComposerDialogLabel(value: string): boolean {
+  const normalized = normalizeForComparison(value);
+  return includesAny(normalized, COMPOSER_DIALOG_TERMS);
+}
+
+function isAddToPostOverlayText(value: string): boolean {
+  const normalized = normalizeForComparison(value);
+  return includesAny(normalized, ADD_TO_POST_OVERLAY_TERMS);
+}
+
+function isBackOrCloseControlText(value: string): boolean {
+  const normalized = normalizeForComparison(value);
+  return includesAny(normalized, BACK_OR_CLOSE_TERMS);
+}
+
+function isBackControlText(value: string): boolean {
+  const normalized = normalizeForComparison(value);
+  return includesAny(normalized, BACK_CONTROL_TERMS);
 }
 
 function isComposerSurfaceText(value: string): boolean {
   const normalized = normalizeForComparison(value);
-  return (
-    normalized.includes("create post") ||
-    normalized.includes("post anonymously") ||
-    normalized.includes("write something") ||
-    normalized.includes("add to your post")
-  );
+  return includesAny(normalized, COMPOSER_SURFACE_TERMS);
+}
+
+function isFileUploadErrorText(value: string): boolean {
+  const normalized = normalizeForComparison(value);
+  return includesAny(normalized, FILE_UPLOAD_ERROR_TERMS);
+}
+
+function isFileUploadDismissControlText(value: string): boolean {
+  const normalized = normalizeForComparison(value);
+  return isBackOrCloseControlText(normalized) || includesAny(normalized, FILE_UPLOAD_DISMISS_TERMS);
+}
+
+async function composerHasAttachedImage(driver: WebDriver): Promise<boolean> {
+  const dialogs = await driver.findElements(By.css("div[role='dialog']"));
+
+  for (const dialog of dialogs) {
+    try {
+      if (!(await dialog.isDisplayed())) {
+        continue;
+      }
+
+      const dialogText = normalizeForComparison(await dialog.getText());
+      const dialogLabel = normalizeForComparison((await dialog.getAttribute("aria-label")) ?? "");
+
+      if (!isComposerSurfaceText(dialogText) && !isComposerDialogLabel(dialogLabel)) {
+        continue;
+      }
+
+      const controls = await dialog.findElements(By.css("[role='button'], button, a[role='button']"));
+      for (const control of controls) {
+        try {
+          if (!(await control.isDisplayed())) {
+            continue;
+          }
+
+          const ariaLabel = normalizeForComparison((await control.getAttribute("aria-label")) ?? "");
+          const text = normalizeForComparison(await control.getText());
+          if (includesAny(`${ariaLabel} ${text}`, ATTACHMENT_REMOVE_TERMS)) {
+            return true;
+          }
+        } catch {
+          // Ignore detached controls while composer re-renders.
+        }
+      }
+
+      const previews = await dialog.findElements(
+        By.css("img[src^='blob:'], img[src*='scontent.'], img[src*='fbcdn.net']")
+      );
+
+      for (const preview of previews) {
+        try {
+          if (!(await preview.isDisplayed())) {
+            continue;
+          }
+
+          const rect = await preview.getRect();
+          if ((rect.width ?? 0) >= 96 && (rect.height ?? 0) >= 96) {
+            return true;
+          }
+        } catch {
+          // Ignore detached previews while DOM updates.
+        }
+      }
+    } catch {
+      // Ignore transient dialog updates.
+    }
+  }
+
+  return false;
+}
+
+async function detectFileUploadError(driver: WebDriver): Promise<string | undefined> {
+  const overlays = await driver.findElements(By.css("div[role='dialog'], div[role='alertdialog'], body"));
+
+  for (const overlay of overlays) {
+    try {
+      if (!(await overlay.isDisplayed())) {
+        continue;
+      }
+
+      const text = normalizeWhitespace(await overlay.getText());
+      if (isFileUploadErrorText(text)) {
+        return text.slice(0, 500);
+      }
+    } catch {
+      // Ignore detached overlays while DOM updates.
+    }
+  }
+
+  return undefined;
+}
+
+async function dismissFileUploadErrorDialogs(driver: WebDriver): Promise<boolean> {
+  const dialogs = await driver.findElements(By.css("div[role='dialog'], div[role='alertdialog']"));
+  let dismissed = false;
+
+  for (const dialog of dialogs) {
+    try {
+      if (!(await dialog.isDisplayed())) {
+        continue;
+      }
+
+      const text = normalizeWhitespace(await dialog.getText());
+      const label = (await dialog.getAttribute("aria-label")) ?? "";
+      if (!isFileUploadErrorText(`${label} ${text}`)) {
+        continue;
+      }
+
+      const composerTextboxes = await dialog.findElements(
+        By.css(
+          "div[role='textbox'][contenteditable='true'], [role='textbox'][contenteditable='true'], div[contenteditable='true'][data-lexical-editor='true']"
+        )
+      );
+      const hasVisibleComposerTextbox = await Promise.all(
+        composerTextboxes.map(async (textbox) => {
+          try {
+            return await textbox.isDisplayed();
+          } catch {
+            return false;
+          }
+        })
+      ).then((flags) => flags.some(Boolean));
+
+      // Inline upload errors can appear inside main composer; never click close there.
+      if (hasVisibleComposerTextbox) {
+        continue;
+      }
+
+      const controls = await dialog.findElements(By.css("[role='button'], button, a[role='button']"));
+      for (const control of controls) {
+        try {
+          if (!(await control.isDisplayed())) {
+            continue;
+          }
+
+          const ariaLabel = (await control.getAttribute("aria-label")) ?? "";
+          const controlText = await control.getText();
+          if (!isFileUploadDismissControlText(`${ariaLabel} ${controlText}`)) {
+            continue;
+          }
+
+          await control.click().catch(async () => {
+            await driver.executeScript("arguments[0].click();", control);
+          });
+          dismissed = true;
+          await driver.sleep(700);
+          break;
+        } catch {
+          // Try next control.
+        }
+      }
+    } catch {
+      // Ignore transient dialog updates.
+    }
+  }
+
+  return dismissed;
 }
 
 function isLikelySubmitLabel(value: string): boolean {
@@ -1686,22 +2066,53 @@ function isLikelySubmitLabel(value: string): boolean {
 
   const blocked = [
     "add to your post",
+    "ajouter a votre publication",
+    "اضافة الى منشورك",
+    "إضافة إلى منشورك",
     "photo/video",
+    "photo / video",
+    "photo video",
     "tag people",
+    "identifier des personnes",
+    "اشارة الى الاشخاص",
     "check in",
+    "je suis la",
+    "تسجيل الدخول",
     "feeling/activity",
+    "humeur/activite",
+    "شعور/نشاط",
     "poll",
+    "sondage",
+    "استطلاع",
     "live video",
     "tag event",
     "create event",
     "file",
     "emoji",
+    "الرمز التعبيري",
     "background",
+    "arriere-plan",
+    "الخلفية",
     "schedule post",
+    "programmer une publication",
+    "جدولة المنشور",
     "close composer dialog",
     "close",
+    "fermer",
+    "اغلاق",
+    "إغلاق",
     "back",
+    "retour",
+    "رجوع",
+    "عودة",
     "more attachment options",
+    "plus d'options de piece jointe",
+    "plus doptions de piece jointe",
+    "خيارات ارفاق اضافية",
+    "منشور مجهول الهوية",
+    "نشر محتوى مجهول الهوية",
+    "post anonymously",
+    "publier de maniere anonyme",
   ];
 
   if (blocked.some((term) => normalized.includes(term))) {
@@ -1710,10 +2121,16 @@ function isLikelySubmitLabel(value: string): boolean {
 
   return (
     normalized === "post" ||
+    normalized === "publier" ||
+    normalized === "نشر" ||
     normalized.startsWith("post ") ||
+    normalized.startsWith("publier ") ||
+    normalized.startsWith("نشر ") ||
     normalized.includes(" post") ||
     normalized.includes("publish") ||
-    normalized.includes("share")
+    normalized.includes("share") ||
+    normalized.includes("publier") ||
+    normalized.includes("نشر")
   );
 }
 
@@ -1728,7 +2145,7 @@ async function waitForComposerSubmitButton(driver: WebDriver, timeoutMs: number)
         const dialogText = normalizeForComparison(await dialog.getText());
         const dialogLabel = normalizeForComparison((await dialog.getAttribute("aria-label")) ?? "");
 
-        if (!isComposerSurfaceText(dialogText) && dialogLabel !== "create post") {
+        if (!isComposerSurfaceText(dialogText) && !isComposerDialogLabel(dialogLabel)) {
           continue;
         }
 
@@ -1776,14 +2193,219 @@ async function waitForComposerSubmitButton(driver: WebDriver, timeoutMs: number)
   throw new Error("Timed out waiting for the composer submit button.");
 }
 
+function extensionFromContentType(contentType: string | null | undefined): string | undefined {
+  const normalized = String(contentType ?? "").toLowerCase();
+  if (!normalized.startsWith("image/")) {
+    return undefined;
+  }
+
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return ".jpg";
+  if (normalized.includes("png")) return ".png";
+  if (normalized.includes("gif")) return ".gif";
+  if (normalized.includes("webp")) return ".webp";
+  if (normalized.includes("tiff") || normalized.includes("tif")) return ".tiff";
+  if (normalized.includes("heic")) return ".heic";
+  if (normalized.includes("heif")) return ".heif";
+  if (normalized.includes("bmp")) return ".bmp";
+  return ".jpg";
+}
+
+function hasKnownImageMagicBytes(buffer: Buffer): boolean {
+  if (!buffer || buffer.length < 4) {
+    return false;
+  }
+
+  return (
+    (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) ||
+    (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) ||
+    (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) ||
+    (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) ||
+    (buffer[0] === 0x49 && buffer[1] === 0x49) ||
+    (buffer[0] === 0x4d && buffer[1] === 0x4d) ||
+    (buffer[0] === 0x42 && buffer[1] === 0x4d)
+  );
+}
+
+async function getDriverCookieHeader(driver: WebDriver): Promise<string | undefined> {
+  try {
+    const cookies = await driver.manage().getCookies();
+    const cookieHeader = cookies
+      .filter((cookie) => cookie?.name && typeof cookie.value === "string")
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+
+    return cookieHeader || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function downloadImageToTempWithRetry(
+  imageUrl: string,
+  driver?: WebDriver,
+  maxAttempts = 2
+): Promise<string> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= Math.max(1, maxAttempts); attempt += 1) {
+    try {
+      return await downloadImageToTemp(imageUrl, driver);
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await sleep(1_250);
+      }
+    }
+  }
+
+  throw (
+    lastError instanceof Error
+      ? lastError
+      : new Error(String(lastError ?? "Failed to download image."))
+  );
+}
+
+function extractFacebookPhotoIdFromImageUrl(imageUrl: string): string | undefined {
+  const normalized = imageUrl.trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  const photoParamMatch = normalized.match(/[?&]fbid=(\d{8,})/i);
+  if (photoParamMatch?.[1]) {
+    return photoParamMatch[1];
+  }
+
+  const filePatternMatch = normalized.match(
+    /\/(\d+)_(\d{8,})_(\d+)_n\.(?:jpg|jpeg|png|webp|gif|bmp|tiff?|heic|heif)/i
+  );
+  if (filePatternMatch?.[2]) {
+    return filePatternMatch[2];
+  }
+
+  return undefined;
+}
+
+function normalizeEscapedScontentUrl(rawUrl: string): string {
+  return rawUrl
+    .replace(/\\u0025/gi, "%")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/gi, "&");
+}
+
+async function resolveFreshFbCdnUrlsFromPhotoPage(
+  driver: WebDriver,
+  imageUrl: string
+): Promise<string[]> {
+  const photoId = extractFacebookPhotoIdFromImageUrl(imageUrl);
+  if (!photoId) {
+    return [];
+  }
+
+  try {
+    const result = (await driver.executeAsyncScript(
+      `
+        const callback = arguments[arguments.length - 1];
+        const photoId = String(arguments[0] ?? "").trim();
+
+        if (!photoId) {
+          callback({ status: 0, urls: [] });
+          return;
+        }
+
+        const sources = [
+          "https://www.facebook.com/photo/?fbid=" + encodeURIComponent(photoId) + "&download=1",
+          "https://www.facebook.com/photo/?fbid=" + encodeURIComponent(photoId),
+          "https://www.facebook.com/photo.php?fbid=" + encodeURIComponent(photoId),
+        ];
+
+        const extractCandidates = (html) => {
+          const candidates = [];
+          const maybePush = (token) => {
+            const value = String(token ?? "").trim();
+            if (!value || !value.includes("scontent")) {
+              return;
+            }
+
+            if (value.startsWith("https://") || value.startsWith("https:\\/\\/")) {
+              candidates.push(value);
+            }
+          };
+
+          const quoteSplit = String(html ?? "").split('"');
+          for (const token of quoteSplit) {
+            maybePush(token);
+          }
+
+          const singleQuoteSplit = String(html ?? "").split("'");
+          for (const token of singleQuoteSplit) {
+            maybePush(token);
+          }
+
+          return candidates;
+        };
+
+        (async () => {
+          const allCandidates = [];
+          let lastStatus = 0;
+
+          for (const source of sources) {
+            try {
+              const response = await fetch(source, { credentials: "include" });
+              lastStatus = response.status;
+
+              const html = await response.text();
+              const extracted = extractCandidates(html);
+              for (const candidate of extracted) {
+                allCandidates.push(candidate);
+              }
+            } catch {
+              // Try the next source URL.
+            }
+          }
+
+          callback({
+            status: lastStatus,
+            urls: Array.from(new Set(allCandidates)).slice(0, 320),
+          });
+        })().catch((error) => callback({
+          status: 0,
+          error: String(error?.message ?? error ?? "unknown"),
+          urls: [],
+        }));
+      `,
+      photoId
+    )) as { status?: number; urls?: string[]; error?: string } | null;
+
+    const rawUrls = Array.isArray(result?.urls) ? result!.urls : [];
+    const normalized = Array.from(
+      new Set(
+        rawUrls
+          .map((url) => normalizeEscapedScontentUrl(String(url ?? "")).trim())
+          .filter(Boolean)
+      )
+    )
+      .filter((url) => /^https?:\/\/scontent\./i.test(url))
+      .filter((url) => /\.(jpg|jpeg|png|webp|gif|bmp|tiff?|heic|heif)(\?|$)/i.test(url))
+      .filter((url) => url.includes(`_${photoId}_`));
+
+    return normalized
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
 async function downloadImageToTemp(imageUrl: string, driver?: WebDriver): Promise<string> {
-  if (!imageUrl.trim()) {
+  const normalizedImageUrl = imageUrl.trim().replace(/^"(.*)"$/, "$1");
+
+  if (!normalizedImageUrl) {
     throw new Error("imageUrl is empty");
   }
 
-  const candidatePath = path.isAbsolute(imageUrl)
-    ? imageUrl
-    : path.join(process.cwd(), imageUrl);
+  const candidatePath = path.isAbsolute(normalizedImageUrl)
+    ? normalizedImageUrl
+    : path.join(process.cwd(), normalizedImageUrl);
 
   try {
     await fs.access(candidatePath);
@@ -1794,48 +2416,147 @@ async function downloadImageToTemp(imageUrl: string, driver?: WebDriver): Promis
 
   await fs.mkdir(TEMP_IMAGE_DIR, { recursive: true });
 
+  const browserLikeHeaders = {
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    referer: "https://www.facebook.com/",
+  };
+
+  let lastFailureReason = "Failed to download image.";
+
+  const persistBufferAsImage = async (
+    sourceUrl: string,
+    contentType: string | null,
+    buffer: Buffer
+  ): Promise<string | undefined> => {
+    const looksLikeImage =
+      String(contentType ?? "").toLowerCase().startsWith("image/") ||
+      hasKnownImageMagicBytes(buffer);
+
+    if (!looksLikeImage || buffer.length === 0) {
+      lastFailureReason = `Image URL did not return a valid image payload (content-type=${contentType ?? "unknown"}).`;
+      return undefined;
+    }
+
+    let extension = extensionFromContentType(contentType);
+    if (!extension) {
+      try {
+        const parsedSource = new URL(sourceUrl);
+        extension = path.extname(parsedSource.pathname) || ".jpg";
+      } catch {
+        extension = ".jpg";
+      }
+    }
+
+    const filePath = path.join(TEMP_IMAGE_DIR, `${randomUUID()}${extension}`);
+    await fs.writeFile(filePath, buffer);
+    return filePath;
+  };
+
+  const tryFetchAndPersist = async (
+    targetUrl: string,
+    headers: Record<string, string>
+  ): Promise<string | undefined> => {
+    try {
+      const response = await fetch(targetUrl, {
+        redirect: "follow",
+        headers,
+      });
+
+      if (!response.ok) {
+        lastFailureReason = `Failed to download image: ${response.status} ${response.statusText}`;
+        return undefined;
+      }
+
+      const contentType = response.headers.get("content-type");
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      return await persistBufferAsImage(targetUrl, contentType, buffer);
+    } catch (error) {
+      lastFailureReason =
+        error instanceof Error ? error.message : String(error ?? "Unknown fetch error");
+      return undefined;
+    }
+  };
+
+  const directFetchResult = await tryFetchAndPersist(normalizedImageUrl, browserLikeHeaders);
+  if (directFetchResult) {
+    return directFetchResult;
+  }
+
+  const cookieHeader = driver ? await getDriverCookieHeader(driver) : undefined;
+  if (cookieHeader) {
+    const cookieFetchResult = await tryFetchAndPersist(normalizedImageUrl, {
+      ...browserLikeHeaders,
+      cookie: cookieHeader,
+    });
+
+    if (cookieFetchResult) {
+      return cookieFetchResult;
+    }
+  }
+
+  const isFbCdn = /fbcdn\.net|facebook\.com\/photo/i.test(normalizedImageUrl);
+
+  if (isFbCdn && driver) {
+    const refreshedUrls = await resolveFreshFbCdnUrlsFromPhotoPage(driver, normalizedImageUrl);
+    const refreshedHeaders = cookieHeader
+      ? { ...browserLikeHeaders, cookie: cookieHeader }
+      : browserLikeHeaders;
+
+    for (const refreshedUrl of refreshedUrls) {
+      const refreshedFetchResult = await tryFetchAndPersist(refreshedUrl, refreshedHeaders);
+      if (refreshedFetchResult) {
+        return refreshedFetchResult;
+      }
+    }
+  }
+
   // For Facebook CDN URLs, use the browser's authenticated session to download
-  const isFbCdn = /fbcdn\.net|facebook\.com\/photo/i.test(imageUrl);
   if (isFbCdn && driver) {
     try {
       const base64Data = await driver.executeAsyncScript(`
         const callback = arguments[arguments.length - 1];
-        fetch(arguments[0])
-          .then(r => r.blob())
-          .then(blob => {
+        fetch(arguments[0], { credentials: "include" })
+          .then(async (r) => {
+            const blob = await r.blob();
             const reader = new FileReader();
-            reader.onloadend = () => callback(reader.result);
+            reader.onloadend = () => callback({
+              dataUrl: reader.result,
+              mimeType: blob.type,
+              size: blob.size,
+              status: r.status,
+              statusText: r.statusText,
+            });
             reader.readAsDataURL(blob);
           })
-          .catch(() => callback(null));
-      `, imageUrl) as string | null;
+          .catch((error) => callback({ error: String(error?.message ?? error ?? "unknown") }));
+      `, normalizedImageUrl) as { dataUrl?: string; mimeType?: string; size?: number } | null;
 
-      if (base64Data && typeof base64Data === "string" && base64Data.includes(",")) {
-        const raw = base64Data.split(",")[1];
-        const extension = base64Data.includes("image/png") ? ".png"
-          : base64Data.includes("image/webp") ? ".webp"
-          : ".jpg";
-        const filePath = path.join(TEMP_IMAGE_DIR, `${randomUUID()}${extension}`);
-        await fs.writeFile(filePath, Buffer.from(raw, "base64"));
-        return filePath;
+      const dataUrl = base64Data?.dataUrl;
+      const mimeType = String(base64Data?.mimeType ?? "");
+      const browserFetchStatus = Number((base64Data as { status?: number } | null)?.status ?? 0);
+      const browserFetchStatusText = String((base64Data as { statusText?: string } | null)?.statusText ?? "");
+
+      if (dataUrl && typeof dataUrl === "string" && dataUrl.includes(",")) {
+        const raw = dataUrl.split(",")[1];
+        const buffer = Buffer.from(raw, "base64");
+        const persisted = await persistBufferAsImage(normalizedImageUrl, mimeType, buffer);
+        if (persisted) {
+          return persisted;
+        }
+      }
+
+      if (browserFetchStatus >= 400) {
+        lastFailureReason = `Failed to download image: ${browserFetchStatus} ${browserFetchStatusText || "Forbidden"}`;
       }
     } catch {
       // Fall through to regular fetch.
     }
   }
 
-  const response = await fetch(imageUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to download image: ${response.status} ${response.statusText}`);
-  }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const url = new URL(imageUrl);
-  const extension = path.extname(url.pathname) || ".jpg";
-  const filePath = path.join(TEMP_IMAGE_DIR, `${randomUUID()}${extension}`);
-  await fs.writeFile(filePath, Buffer.from(arrayBuffer));
-
-  return filePath;
+  throw new Error(lastFailureReason);
 }
 
 export async function publishPost(
@@ -1846,15 +2567,12 @@ export async function publishPost(
   options?: { commentWithPostImage?: boolean }
 ): Promise<PostResult> {
   const normalizedPostText = normalizeWhitespace(postData.post_text);
-  const webDriverPostText = toWebDriverSafeText(normalizedPostText);
+  const requestedImageUrl = postData.image_url.trim();
 
-  if (!webDriverPostText.safeText.trim()) {
+  if (!normalizedPostText.trim()) {
     return {
       success: false,
-      message:
-        webDriverPostText.removedNonBmp
-          ? "Post text only contained unsupported characters (for example, certain emojis) and could not be sent."
-          : "Post text is empty; nothing to publish.",
+      message: "Post text is empty; nothing to publish.",
     };
   }
 
@@ -1868,14 +2586,21 @@ export async function publishPost(
 
   // ΓöÇΓöÇ Step 2: Open the post composer ΓöÇΓöÇ
   await log("Looking for 'Create post' button");
+  const createPostActivatorXpaths = [
+    "//span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')]",
+    "//div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')]",
+    "//div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), " +
+      "'write something')]",
+    "//div[@role='button'][contains(normalize-space(.), 'Exprimez-vous') or contains(normalize-space(.), 'Exprimez vous')]",
+    "//span[contains(normalize-space(.), 'Exprimez-vous') or contains(normalize-space(.), 'Exprimez vous')]/ancestor::*[@role='button'][1]",
+    "//div[@role='button'][contains(normalize-space(.), 'Écrivez') or contains(normalize-space(.), 'Ecrivez')]",
+    "//div[@role='button'][contains(normalize-space(.), 'اكتب')]",
+    "//span[contains(normalize-space(.), 'اكتب')]/ancestor::*[@role='button'][1]",
+    "//div[@role='button'][contains(normalize-space(.), 'إنشاء منشور') or contains(normalize-space(.), 'انشاء منشور')]",
+  ];
   const createPostActivator = await waitForFirstVisibleXpath(
     driver,
-    [
-      "//span[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')]",
-      "//div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create a public post')]",
-      "//div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), " +
-        "'write something')]",
-    ],
+    createPostActivatorXpaths,
     25_000
   );
   await log("Clicking 'Create post' button");
@@ -1885,22 +2610,23 @@ export async function publishPost(
 
   // ΓöÇΓöÇ Step 3: Type post text ΓöÇΓöÇ
   await log("Waiting for post composer textbox");
-  const postInput = await waitForComposerTextbox(driver, 25_000);
+  let postInput = await waitForComposerTextbox(driver, 25_000);
 
-  await log(`Typing post text (${webDriverPostText.safeText.length} chars)`);
+  await log(`Typing post text (${normalizedPostText.length} chars)`);
   await postInput.click();
-  await postInput.sendKeys(webDriverPostText.safeText);
+  await setEditableText(driver, postInput, normalizedPostText);
   await log("Post text entered");
 
   let downloadedImagePath: string | null = null;
   let downloadedCommentImagePath: string | null = null;
   let imageWarning: string | undefined;
+  let imageUploadSucceeded = false;
   try {
     // ΓöÇΓöÇ Step 4: Upload image (if any) ΓöÇΓöÇ
-    if (postData.image_url.trim()) {
+    if (requestedImageUrl) {
       try {
-        await log("Downloading image for upload", postData.image_url.trim().slice(0, 80));
-        downloadedImagePath = await downloadImageToTemp(postData.image_url.trim(), driver);
+        await log("Downloading image for upload", requestedImageUrl.slice(0, 80));
+        downloadedImagePath = await downloadImageToTempWithRetry(requestedImageUrl, driver, 2);
         await log("Image downloaded", downloadedImagePath);
 
         // Validate the downloaded file is actually an image
@@ -1922,11 +2648,13 @@ export async function publishPost(
         if (!isValidImage) {
           const sizeInfo = imageStats ? `${imageStats.size} bytes` : "file not found";
           const headerHex = imageBuffer ? imageBuffer.subarray(0, 8).toString("hex") : "empty";
-          imageWarning = `Image upload skipped: Downloaded file is not a valid image (${sizeInfo}, header: ${headerHex}).`;
+          imageWarning = `Downloaded file header is unusual (${sizeInfo}, header: ${headerHex}). Trying upload anyway.`;
           await log("Image validation failed", imageWarning);
         } else {
           await log("Image validated", `${imageStats!.size} bytes, valid image format`);
+        }
 
+        if (imageStats && imageStats.size > 0) {
           // File inputs are typically hidden; use findElements directly without visibility check
           await log("Looking for file input element");
           let fileInputs = await driver.findElements(By.css("div[role='dialog'] input[type='file']"));
@@ -1947,42 +2675,26 @@ export async function publishPost(
             await log("Image file sent to file input");
             await driver.sleep(3_000);
 
-            // Check for Facebook's "Can't Read Files" error dialog and dismiss it
-            const cantReadDialogs = await driver.findElements(By.xpath(
-              "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), \"can't read\")]" +
-              " | //*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'couldn')]"
-            ));
-            if (cantReadDialogs.length > 0) {
-              await log("Facebook 'Can't Read Files' error detected, dismissing");
-              // Click "Close" button on the error dialog
-              const closeButtons = await driver.findElements(By.xpath(
-                "//div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close')]" +
-                " | //div[@aria-label='Close'] | //*[@aria-label='Close']"
-              ));
-              for (const btn of closeButtons) {
-                try { await btn.click(); } catch { /* continue */ }
+            const uploadErrorText = await detectFileUploadError(driver);
+            if (uploadErrorText) {
+              imageWarning = `Image upload failed: ${uploadErrorText.slice(0, 200)}.`;
+              imageUploadSucceeded = false;
+              await log("Facebook image upload error detected", uploadErrorText.slice(0, 180));
+              if (await dismissFileUploadErrorDialogs(driver)) {
+                await log("Image upload error dialog dismissed");
               }
-              await driver.sleep(1_000);
-
-              // Click the back arrow to return from "Add to your post" to the main composer
-              const backButtons = await driver.findElements(By.xpath(
-                "//div[@role='dialog']//div[@role='button'][@aria-label='Back']" +
-                " | //div[@role='dialog']//a[@aria-label='Back']" +
-                " | //div[@role='dialog']//*[contains(@aria-label, 'back') or contains(@aria-label, 'Back')]"
-              ));
-              for (const btn of backButtons) {
-                try { await btn.click(); } catch { /* continue */ }
-              }
-              await driver.sleep(1_000);
-              imageWarning = "Image upload failed: Facebook reported 'Can't Read Files'. Posting without image.";
-              await log("Recovered from image error, continuing without image");
+              await log("Continuing without image after upload error");
             } else {
+              imageUploadSucceeded = true;
               await log("Image file attached to composer successfully");
             }
           } else {
             imageWarning = "Image upload skipped: No file input found in composer.";
             await log("Image upload skipped", imageWarning);
           }
+        } else {
+          imageWarning = "Image upload skipped: Downloaded file is empty.";
+          await log("Image upload skipped", imageWarning);
         }
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -2007,34 +2719,17 @@ export async function publishPost(
         };
       }
 
-      // Late check for Facebook's "Can't Read Files" error dialog
-      const cantReadDialogs = await driver.findElements(By.xpath(
-        "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), \"can't read\")]" +
-        " | //*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'couldn')]"
-      ));
-      if (cantReadDialogs.length > 0) {
-        await log("LATE DETECTION: 'Can't Read Files' error dialog found, dismissing");
-        // Click "Close" button on the error dialog
-        const closeButtons = await driver.findElements(By.xpath(
-          "//div[@role='button'][contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close')]" +
-          " | //div[@aria-label='Close'] | //*[@aria-label='Close']"
-        ));
-        for (const btn of closeButtons) {
-          try { await btn.click(); } catch { /* continue */ }
+      const lateUploadErrorText = await detectFileUploadError(driver);
+      if (lateUploadErrorText) {
+        if (!imageWarning) {
+          imageWarning = `Image upload failed: ${lateUploadErrorText.slice(0, 200)}.`;
         }
-        await driver.sleep(1_000);
+        imageUploadSucceeded = false;
 
-        // Click the back arrow to return from "Add to your post" to the main composer
-        const backButtons = await driver.findElements(By.xpath(
-          "//div[@role='dialog']//div[@role='button'][@aria-label='Back']" +
-          " | //div[@role='dialog']//a[@aria-label='Back']" +
-          " | //div[@role='dialog']//*[contains(@aria-label, 'back') or contains(@aria-label, 'Back')]"
-        ));
-        for (const btn of backButtons) {
-          try { await btn.click(); } catch { /* continue */ }
+        await log("LATE DETECTION: image upload error found", lateUploadErrorText.slice(0, 180));
+        if (await dismissFileUploadErrorDialogs(driver)) {
+          await log("Recovered from late image error dialog");
         }
-        await driver.sleep(1_000);
-        await log("Recovered from late image error dialog");
       }
 
       const errorOverlays = await driver.findElements(By.xpath(
@@ -2051,26 +2746,213 @@ export async function publishPost(
       await log("Detected 'Add to your post' overlay, returned to main composer");
     }
 
+    const composerStillOpen = await waitForComposerTextbox(driver, 6_000)
+      .then((textbox) => {
+        postInput = textbox;
+        return true;
+      })
+      .catch(() => false);
+
+    if (!composerStillOpen) {
+      await log("Composer disappeared before submit, reopening post composer");
+      const reopenActivator = await waitForFirstVisibleXpath(driver, createPostActivatorXpaths, 20_000);
+      await reopenActivator.click().catch(async () => {
+        await driver.executeScript("arguments[0].click();", reopenActivator);
+      });
+
+      postInput = await waitForComposerTextbox(driver, 20_000);
+      await setEditableText(driver, postInput, normalizedPostText);
+      await log("Composer reopened and post text restored");
+
+      if (downloadedImagePath && requestedImageUrl) {
+        await log("Reattaching image after composer reopen");
+        let reattachInputs = await driver.findElements(By.css("div[role='dialog'] input[type='file']"));
+        if (reattachInputs.length === 0) {
+          reattachInputs = await driver.findElements(By.css("input[type='file'][accept*='image']"));
+        }
+
+        if (reattachInputs.length > 0) {
+          await driver.executeScript(
+            "arguments[0].style.display = 'block'; arguments[0].style.visibility = 'visible'; arguments[0].style.opacity = '1';",
+            reattachInputs[0]
+          );
+          await reattachInputs[0].sendKeys(downloadedImagePath);
+          await driver.sleep(2_000);
+
+          const reattachErrorText = await detectFileUploadError(driver);
+          if (reattachErrorText) {
+            imageWarning = `Image upload failed after composer reopen: ${reattachErrorText.slice(0, 180)}.`;
+            imageUploadSucceeded = false;
+            await dismissFileUploadErrorDialogs(driver);
+          } else {
+            imageUploadSucceeded = true;
+            await log("Image reattached after composer reopen");
+          }
+        } else {
+          imageWarning = "Image upload skipped after composer reopen: file input not found.";
+        }
+      }
+    }
+
+    if (imageWarning) {
+      const expectedProbe = normalizeForComparison(normalizedPostText).slice(
+        0,
+        Math.min(32, normalizedPostText.length)
+      );
+
+      try {
+        const composerText = normalizeForComparison(
+          `${await postInput.getText()} ${(await postInput.getAttribute("textContent")) ?? ""}`
+        );
+        if (expectedProbe && !composerText.includes(expectedProbe)) {
+          await log("Composer text missing after image flow, retyping post text");
+          postInput = await waitForComposerTextbox(driver, 10_000);
+          await setEditableText(driver, postInput, normalizedPostText);
+        }
+      } catch {
+        await log("Composer text check failed, reacquiring textbox");
+        postInput = await waitForComposerTextbox(driver, 10_000);
+        await setEditableText(driver, postInput, normalizedPostText);
+      }
+    }
+
+    if (requestedImageUrl && downloadedImagePath && !imageUploadSucceeded) {
+      await log("Retrying image attach before submit");
+      let retryInputs = await driver.findElements(By.css("div[role='dialog'] input[type='file']"));
+      if (retryInputs.length === 0) {
+        retryInputs = await driver.findElements(By.css("input[type='file'][accept*='image']"));
+      }
+      if (retryInputs.length === 0) {
+        retryInputs = await driver.findElements(By.css("input[type='file']"));
+      }
+
+      if (retryInputs.length > 0) {
+        await driver.executeScript(
+          "arguments[0].style.display = 'block'; arguments[0].style.visibility = 'visible'; arguments[0].style.opacity = '1';",
+          retryInputs[0]
+        );
+        await retryInputs[0].sendKeys(downloadedImagePath);
+        await driver.sleep(2_000);
+
+        const retryUploadErrorText = await detectFileUploadError(driver);
+        if (retryUploadErrorText) {
+          imageWarning = `Image upload failed on retry: ${retryUploadErrorText.slice(0, 180)}.`;
+          imageUploadSucceeded = false;
+          await dismissFileUploadErrorDialogs(driver);
+        } else {
+          imageUploadSucceeded = true;
+          await log("Image attached successfully on retry");
+        }
+      }
+    }
+
+    if (requestedImageUrl && !imageUploadSucceeded) {
+      const failureDetails = imageWarning ?? "Image upload failed before submit.";
+      await log("Image upload failed before submit, aborting post", failureDetails.slice(0, 220));
+      return {
+        success: false,
+        message: `Image upload failed for group ${groupId}; post submit was aborted to avoid text-only publishing.`,
+        details: failureDetails,
+      };
+    }
+
     await log("Looking for Post/Submit button");
-    const publishButton = await waitForComposerSubmitButton(driver, 20_000);
+    let publishButton: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
+    try {
+      publishButton = await waitForComposerSubmitButton(driver, 20_000);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error ?? "");
+      await log("Post/Submit button not found in time, using keyboard fallback", reason.slice(0, 180));
+    }
+
     let dialogClosed = false;
 
     for (let submitAttempt = 1; submitAttempt <= 3; submitAttempt += 1) {
       await log(`Submitting post (attempt ${submitAttempt}/3)`);
-      if (submitAttempt === 1) {
-        await publishButton.click().catch(async () => {
-          await driver.executeScript("arguments[0].click();", publishButton);
-        });
-      } else if (submitAttempt === 2) {
-        await postInput.sendKeys(Key.chord(Key.CONTROL, Key.ENTER)).catch(() => undefined);
-      } else {
-        await driver.executeScript("arguments[0].click();", publishButton).catch(() => undefined);
+
+      if (requestedImageUrl && downloadedImagePath) {
+        const hasAttachedImage = await composerHasAttachedImage(driver);
+        if (!hasAttachedImage) {
+          await log("Image appears missing before submit retry, reattaching");
+          let retryInputs = await driver.findElements(By.css("div[role='dialog'] input[type='file']"));
+          if (retryInputs.length === 0) {
+            retryInputs = await driver.findElements(By.css("input[type='file'][accept*='image']"));
+          }
+          if (retryInputs.length === 0) {
+            retryInputs = await driver.findElements(By.css("input[type='file']"));
+          }
+
+          if (retryInputs.length > 0) {
+            await driver.executeScript(
+              "arguments[0].style.display = 'block'; arguments[0].style.visibility = 'visible'; arguments[0].style.opacity = '1';",
+              retryInputs[0]
+            );
+            await retryInputs[0].sendKeys(downloadedImagePath);
+            await driver.sleep(2_000);
+
+            const retryUploadErrorText = await detectFileUploadError(driver);
+            if (retryUploadErrorText) {
+              imageWarning = `Image upload failed during submit retry: ${retryUploadErrorText.slice(0, 180)}.`;
+              imageUploadSucceeded = false;
+              await dismissFileUploadErrorDialogs(driver);
+              await log("Image reattach failed before submit retry", retryUploadErrorText.slice(0, 160));
+            } else {
+              imageUploadSucceeded = true;
+              await log("Image reattached before submit retry");
+            }
+          }
+        }
+      }
+
+      publishButton = await waitForComposerSubmitButton(driver, submitAttempt === 1 ? 6_000 : 3_500).catch(() => undefined);
+
+      let submitTriggered = false;
+
+      if (publishButton) {
+        try {
+          await publishButton.click();
+          submitTriggered = true;
+        } catch {
+          try {
+            await driver.executeScript("arguments[0].click();", publishButton);
+            submitTriggered = true;
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error ?? "");
+            await log("Submit button click failed, will refresh reference", reason.slice(0, 180));
+            publishButton = undefined;
+          }
+        }
+      }
+
+      if (!submitTriggered) {
+        try {
+          postInput = await waitForComposerTextbox(driver, 3_000).catch(() => postInput);
+          await postInput.sendKeys(Key.chord(Key.CONTROL, Key.ENTER));
+          submitTriggered = true;
+          await log("Used keyboard submit fallback (Ctrl+Enter)");
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error ?? "");
+          await log("Keyboard submit fallback failed", reason.slice(0, 180));
+        }
+      }
+
+      if (!submitTriggered) {
+        await log("Submit action could not be triggered for this attempt");
+        continue;
       }
 
       dialogClosed = await waitForComposerToClose(driver, submitAttempt === 1 ? 20_000 : 12_000);
       if (dialogClosed) {
         await log("Post composer closed successfully");
         break;
+      }
+
+      const lateUploadErrorText = await detectFileUploadError(driver);
+      if (lateUploadErrorText) {
+        imageWarning = `Image upload failed after submit click: ${lateUploadErrorText.slice(0, 200)}.`;
+        imageUploadSucceeded = false;
+        await dismissFileUploadErrorDialogs(driver);
+        await log("Detected upload error after submit click", lateUploadErrorText.slice(0, 180));
       }
 
       const actionBlockedText = await detectFacebookActionBlock(driver);
@@ -2116,9 +2998,6 @@ export async function publishPost(
     // ΓöÇΓöÇ Step 6: Add comment link (if any) after quick group search ΓöÇΓöÇ
     if (!postData.comment_link.trim()) {
       const details = [
-        webDriverPostText.removedNonBmp
-          ? "Some non-BMP characters were removed from post text because ChromeDriver cannot send them via sendKeys."
-          : undefined,
         imageWarning,
       ]
         .filter(Boolean)
@@ -2133,7 +3012,7 @@ export async function publishPost(
     }
 
     await log("Locating submitted post in group feed for commenting");
-    const expectedSnippet = createPostVerificationSnippet(webDriverPostText.safeText);
+    const expectedSnippet = createPostVerificationSnippet(normalizedPostText);
     let matchedArticle: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
     let matchLookupError: string | undefined;
 
@@ -2230,7 +3109,7 @@ export async function publishPost(
             throw new Error("Comment input box was not found after opening comments.");
           }
 
-          await currentCommentInput.sendKeys(postData.comment_link);
+          await setEditableText(driver, currentCommentInput, postData.comment_link);
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : "";
@@ -2365,9 +3244,6 @@ export async function publishPost(
     const details = [
       commentWarning,
       commentImageWarning,
-      webDriverPostText.removedNonBmp
-        ? "Some non-BMP characters were removed from post text because ChromeDriver cannot send them via sendKeys."
-        : undefined,
       imageWarning,
     ]
       .filter(Boolean)

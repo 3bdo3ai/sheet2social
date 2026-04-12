@@ -749,6 +749,105 @@ async function clickCommentButton(
   );
 }
 
+async function setEditableText(
+  driver: WebDriver,
+  element: Awaited<ReturnType<WebDriver["findElement"]>>,
+  value: string
+): Promise<void> {
+  await driver.executeScript(
+    `
+      const el = arguments[0];
+      const nextValue = String(arguments[1] ?? "");
+
+      const dispatchInputEvents = () => {
+        try {
+          el.dispatchEvent(new InputEvent("beforeinput", {
+            bubbles: true,
+            cancelable: true,
+            inputType: "insertText",
+            data: nextValue,
+          }));
+        } catch {
+          // Ignore unsupported InputEvent constructor.
+        }
+
+        try {
+          el.dispatchEvent(new InputEvent("input", {
+            bubbles: true,
+            inputType: "insertText",
+            data: nextValue,
+          }));
+        } catch {
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      const contentEditableAttr = String(el.getAttribute?.("contenteditable") ?? "").toLowerCase();
+      const isContentEditable = Boolean(el.isContentEditable) || contentEditableAttr === "true";
+
+      if (typeof el.focus === "function") {
+        el.focus();
+      }
+
+      if (isContentEditable) {
+        const selection = window.getSelection();
+        if (selection) {
+          selection.removeAllRanges();
+          const clearRange = document.createRange();
+          clearRange.selectNodeContents(el);
+          selection.addRange(clearRange);
+        }
+
+        if (typeof document.execCommand === "function") {
+          try {
+            document.execCommand("selectAll", false);
+          } catch {
+            // Ignore unsupported command.
+          }
+          try {
+            document.execCommand("delete", false);
+          } catch {
+            // Ignore unsupported command.
+          }
+          try {
+            document.execCommand("insertText", false, nextValue);
+          } catch {
+            // Ignore unsupported command.
+          }
+        }
+
+        if ((el.textContent ?? "") !== nextValue) {
+          el.textContent = nextValue;
+        }
+
+        if (selection) {
+          const endRange = document.createRange();
+          endRange.selectNodeContents(el);
+          endRange.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(endRange);
+        }
+
+        dispatchInputEvents();
+        return;
+      }
+
+      if ("value" in el) {
+        el.value = nextValue;
+        dispatchInputEvents();
+        return;
+      }
+
+      el.textContent = nextValue;
+      dispatchInputEvents();
+    `,
+    element,
+    value
+  );
+}
+
 async function submitComment(
   driver: WebDriver,
   article: Awaited<ReturnType<WebDriver["findElement"]>>,
@@ -763,7 +862,7 @@ async function submitComment(
       commentInput = await waitForCommentInput(driver, article);
       await driver.executeScript("arguments[0].scrollIntoView({block: 'center'});", commentInput).catch(() => undefined);
       await driver.executeScript("arguments[0].focus();", commentInput).catch(() => undefined);
-      await commentInput.sendKeys(commentText);
+      await setEditableText(driver, commentInput, commentText);
     } catch (error) {
       commentInput = undefined;
       const message = error instanceof Error ? error.message : "";

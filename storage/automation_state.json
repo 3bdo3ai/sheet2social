@@ -1,13 +1,14 @@
 {
-  "state": "stopped",
+  "state": "running",
   "settings": {
-    "waitIntervalMinutes": 1,
-    "delayBetweenAccountsMinutes": 1,
-    "postsPerGroup": 15,
     "parallelAccounts": 3,
-    "maxPostsPerAccountPerCycle": 3,
-    "commentWithPostImage": true,
+    "waitIntervalMinutes": 120,
+    "delayBetweenAccountsMinutes": 2,
+    "postsPerGroup": 15,
+    "maxPostsPerAccountPerCycle": 11,
+    "postsPerSession": 20,
+    "commentWithPostImage": false,
     "proxyRotationEnabled": false
   },
-  "updatedAt": "2026-04-09T22:16:52.307Z"
+  "updatedAt": "2026-04-12T01:52:12.065Z"
 }

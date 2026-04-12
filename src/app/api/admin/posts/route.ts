@@ -11,7 +11,7 @@ import {
   writeCsvPosts,
   updateCsvPostByIndex,
 } from "@/lib/csvPosts";
-import { parseCsv, validateCsvHeaders } from "@/lib/csvImport";
+import { parseCsv, normalizeCsvHeader } from "@/lib/csvImport";
 import { initializeDbStorage, readParquetRecords } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -64,21 +64,25 @@ export async function POST(request: Request) {
 
     const csvText = await file.text();
     const parsed = parseCsv(csvText);
-    const schemaError = validateCsvHeaders(parsed.headers, [
-      "post_text",
-      "image_url",
-      "comment_link",
-      "status",
-    ]);
+    const normalizedHeaders = parsed.headers.map((header) => normalizeCsvHeader(header));
+    const requiredHeaders = ["post_text", "comment_link", "status"];
+    const hasAllRequiredHeaders = requiredHeaders.every((header) => normalizedHeaders.includes(header));
+    const hasImageHeader = normalizedHeaders.includes("image_url") || normalizedHeaders.includes("url");
 
-    if (schemaError) {
-      return NextResponse.json({ error: schemaError }, { status: 400 });
+    if (!hasAllRequiredHeaders || !hasImageHeader) {
+      return NextResponse.json(
+        {
+          error:
+            "Invalid CSV schema. Required headers: post_text and one of (image_url,url), plus comment_link,status",
+        },
+        { status: 400 }
+      );
     }
 
     const validRows = parsed.rows
       .map((row) => ({
         post_text: row.post_text,
-        image_url: row.image_url,
+        image_url: String(row.image_url ?? row.url ?? ""),
         comment_link: row.comment_link,
         status: row.status,
       }))
@@ -105,6 +109,7 @@ export async function POST(request: Request) {
   const groupId = String(formData.get("groupId") ?? "").trim();
   const postText = String(formData.get("postText") ?? "").trim();
   const commentLink = String(formData.get("commentLink") ?? "").trim();
+  const imageUrlInput = String(formData.get("imageUrl") ?? "").trim();
   const addComment = String(formData.get("addComment") ?? "false") === "true";
   const image = formData.get("image");
 
@@ -122,8 +127,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Group not found" }, { status: 404 });
   }
 
-  let imageUrl = "";
-  if (image instanceof File && image.size > 0) {
+  let imageUrl = imageUrlInput;
+  if (!imageUrl && image instanceof File && image.size > 0) {
     await fs.mkdir(IMAGE_DIR, { recursive: true });
     const ext = path.extname(image.name) || ".jpg";
     const fileName = `${randomUUID()}${ext}`;
@@ -148,6 +153,7 @@ export async function PUT(request: Request) {
   const payload = (await request.json()) as {
     id?: string;
     postText?: string;
+    imageUrl?: string;
     commentLink?: string;
     status?: string;
   };
@@ -178,6 +184,7 @@ export async function PUT(request: Request) {
 
   const updated = await updateCsvPostByIndex(group.csvPath, rowIndex, {
     post_text: payload.postText,
+    image_url: payload.imageUrl,
     comment_link: payload.commentLink,
     status: payload.status,
   });

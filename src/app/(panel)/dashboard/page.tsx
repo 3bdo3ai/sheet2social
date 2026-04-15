@@ -17,6 +17,25 @@ type LogItem = {
   createdAt: string;
 };
 
+type LicenseSessionView = {
+  keyString: string;
+  status: "active" | "paused" | "expired" | "revoked";
+  validUntil: string;
+  remainingMs: number;
+  isAdmin: boolean;
+  userName: string | null;
+};
+
+function formatRemaining(ms: number): string {
+  const clamped = Math.max(0, ms);
+  const totalSeconds = Math.floor(clamped / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+
+  return `${days}d ${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m`;
+}
+
 export default function DashboardPage() {
   const [stats, setStats] = useState<Stats>({
     totalPosts: 0,
@@ -25,19 +44,28 @@ export default function DashboardPage() {
     status: "stopped",
   });
   const [logs, setLogs] = useState<LogItem[]>([]);
+  const [session, setSession] = useState<LicenseSessionView | null>(null);
   const [loading, setLoading] = useState(true);
 
   async function loadData() {
-    const [statsRes, logsRes] = await Promise.all([
+    const [statsRes, logsRes, sessionRes] = await Promise.all([
       fetch("/api/admin/dashboard/stats"),
       fetch("/api/admin/logs?limit=25"),
+      fetch("/api/license/session", { cache: "no-store" }),
     ]);
 
     const statsData = (await statsRes.json()) as Stats;
     const logsData = (await logsRes.json()) as LogItem[];
 
+    let sessionData: LicenseSessionView | null = null;
+    if (sessionRes.ok) {
+      const payload = (await sessionRes.json()) as { session: LicenseSessionView };
+      sessionData = payload.session;
+    }
+
     setStats(statsData);
     setLogs(logsData);
+    setSession(sessionData);
     setLoading(false);
   }
 
@@ -63,6 +91,12 @@ export default function DashboardPage() {
   const lastEvent = logs[0]?.createdAt ? new Date(logs[0].createdAt).toLocaleString() : "No activity yet";
   const healthTone = healthScore >= 75 ? "healthy" : healthScore >= 50 ? "watch" : "critical";
 
+  const licenseSummary = session
+    ? session.isAdmin
+      ? "Admin session (non-expiring)"
+      : formatRemaining(session.remainingMs)
+    : "Loading";
+
   const insights: string[] = [];
   if (stats.totalAccounts === 0) insights.push("No accounts configured. Add at least one account to start automation.");
   if (stats.totalGroups === 0) insights.push("No groups available. Add groups to create posting targets.");
@@ -86,6 +120,25 @@ export default function DashboardPage() {
           </div>
         </div>
       </header>
+
+      <div className="app-card p-4 md:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.15em] text-[#9fc4ef]">License Session</p>
+            <p className="mt-1 text-sm text-[#d8e9ff]">
+              {session?.isAdmin ? "Admin" : "User"} access · Status {session?.status ?? "..."}
+            </p>
+          </div>
+          <span className={session?.status === "active" ? "status-chip status-running" : "status-chip status-stopped"}>
+            {session?.status ?? "loading"}
+          </span>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <SmallStat label="Role" valueText={session?.isAdmin ? "Admin" : "User"} />
+          <SmallStat label="Remaining" valueText={licenseSummary} />
+          <SmallStat label="Key" valueText={session?.keyString ?? "--"} mono />
+        </div>
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.45fr_1fr]">
         <div className="space-y-4">
@@ -199,11 +252,23 @@ function Card({
   );
 }
 
-function SmallStat({ label, value }: { label: string; value: number }) {
+function SmallStat({
+  label,
+  value,
+  valueText,
+  mono,
+}: {
+  label: string;
+  value?: number;
+  valueText?: string;
+  mono?: boolean;
+}) {
   return (
     <div className="rounded-lg border border-[var(--border)] bg-[#10223f] px-3 py-2">
       <p className="text-xs text-[#9eb8dc]">{label}</p>
-      <p className="mt-1 text-lg font-semibold text-[#e4f0ff]">{value}</p>
+      <p className={`mt-1 text-lg font-semibold text-[#e4f0ff] ${mono ? "font-mono text-sm break-all" : ""}`}>
+        {valueText ?? value ?? "--"}
+      </p>
     </div>
   );
 }

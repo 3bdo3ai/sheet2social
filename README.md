@@ -91,6 +91,31 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 ```
 
+### Bootstrap The First Admin License Key
+
+Run the one-time bootstrap script to create an initial active license key and automatically append it to `LICENSE_ADMIN_KEYS` in `.env.local`.
+
+```bash
+npm run license:bootstrap
+```
+
+When passing flags, use an extra argument separator so npm forwards options correctly:
+
+```bash
+npm run license:bootstrap -- -- --force --valid-until 2027-01-01T00:00:00Z --redact-key
+```
+
+Optional flags:
+
+- `--days 365` sets validity duration in days.
+- `--valid-until 2027-01-01T00:00:00Z` sets an exact expiry date/time.
+- `--name "Primary Admin" --email "admin@example.com" --phone "..."`
+- `--notes "Initial bootstrap key"`
+- `--force` allows adding another admin key when one already exists in `LICENSE_ADMIN_KEYS`.
+- `--no-env-update` creates the key without editing `.env.local`.
+- `--env-file .env.local` chooses a different env file path.
+- `--redact-key` masks the printed key in terminal output.
+
 ### Customization
 
 1. Update `src/app/layout.tsx` with your app title and description

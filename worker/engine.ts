@@ -250,10 +250,41 @@ function isRecoverableBrowserSessionError(message: string | undefined): boolean 
   const text = normalizeForComparison(message ?? "");
   return (
     text.includes("nosuchsessionerror") ||
+    text.includes("nosuchwindowerror") ||
+    text.includes("no such window") ||
+    text.includes("target window already closed") ||
+    text.includes("web view not found") ||
+    text.includes("chrome not reachable") ||
     text.includes("invalid session id") ||
     text.includes("session deleted as the browser has closed") ||
+    text.includes("stale element reference") ||
     text.includes("not connected to devtools")
   );
+}
+
+function isRecoverablePublishFlowError(
+  message: string | undefined,
+  details: string | undefined
+): boolean {
+  const text = normalizeForComparison(`${message ?? ""} ${details ?? ""}`);
+  return (
+    text.includes("timed out waiting for the post composer textbox") ||
+    text.includes("timed out waiting for xpaths") ||
+    text.includes("timed out waiting for selectors") ||
+    text.includes("post composer did not close after clicking post")
+  );
+}
+
+function getSkippablePostFailureStatus(
+  message: string | undefined,
+  details: string | undefined
+): string | undefined {
+  const text = normalizeForComparison(`${message ?? ""} ${details ?? ""}`);
+  if (text.includes("post text is empty") || text.includes("nothing to publish")) {
+    return "failed:empty-post-text";
+  }
+
+  return undefined;
 }
 
 function getAccountCooldownRemainingMs(accountId: string): number {
@@ -1192,7 +1223,15 @@ async function detectFacebookActionBlock(driver: WebDriver): Promise<string | un
 
 function isCompletedPostStatus(status: string): boolean {
   const normalized = normalizeStatus(status);
-  return normalized === "posted" || normalized === "done" || normalized === "completed" || normalized === "success";
+  return (
+    normalized === "posted" ||
+    normalized === "done" ||
+    normalized === "completed" ||
+    normalized === "success" ||
+    normalized.startsWith("failed") ||
+    normalized.startsWith("invalid") ||
+    normalized.startsWith("skipped")
+  );
 }
 
 function extractIpFromText(raw: string): string | undefined {
@@ -1416,6 +1455,15 @@ async function finalizeClaimedPostAsDone(
   rowIndex: number,
   claimToken: string
 ): Promise<void> {
+  await finalizeClaimedPostWithStatus(csvFilePath, rowIndex, claimToken, "done");
+}
+
+async function finalizeClaimedPostWithStatus(
+  csvFilePath: string,
+  rowIndex: number,
+  claimToken: string,
+  status: string
+): Promise<void> {
   await withCsvFileLock(csvFilePath, async () => {
     const resolvedPath = resolveCsvPath(csvFilePath);
     const rows = await readCsvRows(resolvedPath);
@@ -1430,7 +1478,7 @@ async function finalizeClaimedPostAsDone(
 
     rows[rowIndex] = {
       ...rows[rowIndex],
-      status: "done",
+      status,
     };
     await writeCsvRows(resolvedPath, rows);
   });
@@ -1471,7 +1519,7 @@ export async function fetchNextPost(
     const row = rows[index];
     const status = normalizeStatus(row.status);
 
-    if (status !== "posted" && status !== "done" && status !== "completed" && status !== "success") {
+    if (!isCompletedPostStatus(status) && !isProcessingPostStatus(status)) {
       return { row, rowIndex: index };
     }
   }
@@ -4356,11 +4404,12 @@ async function processGroupPosts(
   account: FbAccountRecord,
   settings: AutomationSettings,
   maxPostsForAccountInCycle: number
-): Promise<{ postedCount: number; stopRequested: boolean }> {
+): Promise<{ postedCount: number; stopRequested: boolean; accountIssueDetected: boolean }> {
   const postTransitionDelayMs = 1_500;
   const targetPostsForGroup = Math.min(settings.postsPerGroup, Math.max(0, maxPostsForAccountInCycle));
   let postedCount = 0;
-  let recoverableSessionCrashCount = 0;
+  let recoverableBrowserResetCount = 0;
+  let accountIssueDetected = false;
   let sharedContext:
     | {
         browser: BrowserLaunchResult;
@@ -4371,7 +4420,7 @@ async function processGroupPosts(
   let shouldHoldBrowser = false;
 
   if (targetPostsForGroup <= 0) {
-    return { postedCount, stopRequested: false };
+    return { postedCount, stopRequested: false, accountIssueDetected };
   }
 
   try {
@@ -4383,7 +4432,7 @@ async function processGroupPosts(
           accountId: account.id,
           groupId: group.id,
         });
-        return { postedCount, stopRequested: true };
+        return { postedCount, stopRequested: true, accountIssueDetected };
       }
 
       const claimOwner = `${account.id}:${group.id}`;
@@ -4396,6 +4445,27 @@ async function processGroupPosts(
           groupId: group.id,
         });
         break;
+      }
+
+      const normalizedPendingPostText = normalizeWhitespace(String(pending.row.post_text ?? ""));
+      if (!normalizedPendingPostText.trim()) {
+        const skippedStatus = "failed:empty-post-text";
+        await finalizeClaimedPostWithStatus(
+          group.csvPath,
+          pending.rowIndex,
+          pending.claimToken,
+          skippedStatus
+        );
+
+        await appendLog({
+          level: "info",
+          message: `[SKIPPED] CSV row has empty post text and was skipped before browser publish | account=${account.name} | groupId=${group.groupId} | post=${postCounter + 1}/${targetPostsForGroup}`,
+          accountId: account.id,
+          groupId: group.id,
+          details: `CSV row ${pending.rowIndex + 1} marked as ${skippedStatus}.`,
+        });
+
+        continue;
       }
 
       if (!sharedContext) {
@@ -4473,6 +4543,7 @@ async function processGroupPosts(
 
         if (!authenticated) {
           shouldHoldBrowser = true;
+          accountIssueDetected = true;
           await appendLog({
             level: "error",
             message: `Unable to establish authenticated Facebook session for account ${account.name}.`,
@@ -4492,11 +4563,11 @@ async function processGroupPosts(
       const result = await executeSeleniumPost(account, group, pending.row, settings, sharedContext);
       if (result.message === "Automation stop requested by user.") {
         await releaseClaimedPost(group.csvPath, pending.rowIndex, pending.claimToken).catch(() => undefined);
-        return { postedCount, stopRequested: true };
+        return { postedCount, stopRequested: true, accountIssueDetected };
       }
 
       if (result.success) {
-        recoverableSessionCrashCount = 0;
+        recoverableBrowserResetCount = 0;
         await finalizeClaimedPostAsDone(group.csvPath, pending.rowIndex, pending.claimToken);
         postedCount += 1;
         await appendLog({
@@ -4511,16 +4582,41 @@ async function processGroupPosts(
           shouldHoldBrowser = true;
         }
       } else {
+        const skippableFailureStatus = getSkippablePostFailureStatus(result.message, result.details);
+        if (skippableFailureStatus) {
+          await finalizeClaimedPostWithStatus(
+            group.csvPath,
+            pending.rowIndex,
+            pending.claimToken,
+            skippableFailureStatus
+          );
+
+          await appendLog({
+            level: "info",
+            message: `[SKIPPED] ${result.message} | account=${account.name} | groupId=${group.groupId} | post=${postCounter + 1}/${targetPostsForGroup}`,
+            accountId: account.id,
+            groupId: group.id,
+            details: `CSV row ${pending.rowIndex + 1} marked as ${skippableFailureStatus}.`,
+          });
+
+          continue;
+        }
+
         const recoverableSessionError =
           isRecoverableBrowserSessionError(result.message) ||
           isRecoverableBrowserSessionError(result.details);
+        const recoverablePublishFlowError = isRecoverablePublishFlowError(
+          result.message,
+          result.details
+        );
+        const recoverableByBrowserReset = recoverableSessionError || recoverablePublishFlowError;
 
-        if (recoverableSessionError && recoverableSessionCrashCount < 2) {
-          recoverableSessionCrashCount += 1;
+        if (recoverableByBrowserReset && recoverableBrowserResetCount < 2) {
+          recoverableBrowserResetCount += 1;
           await releaseClaimedPost(group.csvPath, pending.rowIndex, pending.claimToken).catch(() => undefined);
           await appendLog({
             level: "info",
-            message: `Browser session dropped for account ${account.name} in group ${group.groupId}. Re-initializing browser and retrying post ${postCounter + 1}/${targetPostsForGroup} (attempt ${recoverableSessionCrashCount}/2).`,
+            message: `Browser/composer flow issue for account ${account.name} in group ${group.groupId}. Re-initializing browser and retrying post ${postCounter + 1}/${targetPostsForGroup} (attempt ${recoverableBrowserResetCount}/2).`,
             accountId: account.id,
             groupId: group.id,
             details: result.details,
@@ -4538,6 +4634,7 @@ async function processGroupPosts(
 
         await releaseClaimedPost(group.csvPath, pending.rowIndex, pending.claimToken).catch(() => undefined);
         shouldHoldBrowser = true;
+        accountIssueDetected = true;
         if (isActionBlockedMessage(result.message) || isActionBlockedMessage(result.details)) {
           const cooldownUntil = Date.now() + ACTION_BLOCK_COOLDOWN_MS;
           accountCooldownUntil.set(account.id, cooldownUntil);
@@ -4575,7 +4672,7 @@ async function processGroupPosts(
       }
     }
 
-    return { postedCount, stopRequested: false };
+    return { postedCount, stopRequested: false, accountIssueDetected };
   } finally {
     if (sharedContext) {
       await holdVisibleBrowserForDebug(
@@ -4926,6 +5023,18 @@ async function runCycle(): Promise<number> {
 
             if (groupResult.stopRequested) {
               remainingAccountQuota = 0;
+              break;
+            }
+
+            if (groupResult.accountIssueDetected) {
+              remainingAccountQuota = 0;
+              readyAccountSessions.delete(account.id);
+              await appendLog({
+                level: "info",
+                message: `Account ${account.name} encountered a browser/session issue in group ${entry.group.groupId}. Stopping this account for the rest of the cycle and continuing other accounts.`,
+                accountId: account.id,
+                groupId: entry.group.id,
+              });
               break;
             }
 

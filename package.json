@@ -2,6 +2,7 @@
   "name": "nextjs-arabic-template",
   "version": "1.0.0",
   "private": true,
+  "main": "main.js",
   "scripts": {
     "dev": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js dev",
     "dev:headless": "cross-env WORKER_VISIBLE_BROWSER=false NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js dev",
@@ -12,7 +13,12 @@
     "worker:once": "tsx worker/engine.ts --once",
     "worker:visible": "cross-env WORKER_VISIBLE_BROWSER=true WORKER_VISUAL_TRACE=true WORKER_SKIP_PREFLIGHT_IN_VISIBLE_MODE=true WORKER_DEBUG_BROWSER_HOLD_FAILURE_ONLY=true WORKER_DEBUG_BROWSER_HOLD_MS=0 tsx worker/engine.ts",
     "comment:test": "tsx scripts/comment-test.ts",
-    "license:bootstrap": "tsx scripts/bootstrap-license-admin.ts"
+    "license:bootstrap": "tsx scripts/bootstrap-license-admin.ts",
+    "web:dev": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js dev",
+    "web:build": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js build",
+    "electron:dev": "node scripts/run-electron.js dev",
+    "electron:start": "npm run web:build && node scripts/run-electron.js start",
+    "electron:build": "npm run web:build && electron-builder"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -26,11 +32,12 @@
     "googleapis": "^171.4.0",
     "lucide-react": "^1.8.0",
     "next": "^16.2.1",
+    "otpauth": "^9.5.0",
     "parquetjs-lite": "^0.8.7",
     "proxy-chain": "^2.7.1",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "selenium-webdriver": "^4.41.0",
+    "selenium-webdriver": "^4.43.0",
     "tailwindcss-rtl": "^0.9.0"
   },
   "devDependencies": {
@@ -39,6 +46,8 @@
     "@types/react-dom": "^19",
     "@types/selenium-webdriver": "^4.35.5",
     "cross-env": "^10.1.0",
+    "electron": "^41.2.0",
+    "electron-builder": "^26.8.1",
     "eslint": "^9",
     "eslint-config-next": "^16.2.1",
     "postcss": "^8",

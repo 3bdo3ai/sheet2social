@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import { ModalShell } from "@/components/ui/modal-shell";
+import { LogoutButton } from "@/components/license/logout-button";
 
 type LicenseStatus = "active" | "paused" | "expired" | "revoked";
 
@@ -320,6 +321,7 @@ export function LicenseAdminPortal() {
             <Link href="/dashboard" className="btn-subtle inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold">
               User Panel
             </Link>
+            <LogoutButton className="btn-subtle inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold" />
             <button
               type="button"
               onClick={() => setCreateOpen(true)}

@@ -65,6 +65,9 @@ if (args[0] === 'dev' || args[0] === 'start') {
   const forceVisible = workerVisibleEnv === 'true';
   const useVisibleWorker = forceVisible || (args[0] === 'dev' && !forceHeadless);
   const workerScript = useVisibleWorker ? 'worker:visible' : 'worker:engine';
+  const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const npmExecPath = process.env.npm_execpath;
+  const npmNodeExecPath = process.env.npm_node_execpath || process.execPath;
   const workerEnv = { ...process.env };
 
   if (useVisibleWorker) {
@@ -91,11 +94,17 @@ if (args[0] === 'dev' || args[0] === 'start') {
     );
 
     const startedAt = Date.now();
-    workerProcess = spawn('npm', ['run', workerScript], {
-      env: workerEnv,
-      stdio: 'inherit',
-      shell: true,
-    });
+    if (npmExecPath) {
+      workerProcess = spawn(npmNodeExecPath, [npmExecPath, 'run', workerScript], {
+        env: workerEnv,
+        stdio: 'inherit',
+      });
+    } else {
+      workerProcess = spawn(npmCommand, ['run', workerScript], {
+        env: workerEnv,
+        stdio: 'inherit',
+      });
+    }
 
     workerProcess.on('error', (err) => {
       console.error(`Failed to start worker process: ${err}`);

@@ -1958,6 +1958,28 @@ function isFileUploadDismissControlText(value: string): boolean {
   return isBackOrCloseControlText(normalized) || includesAny(normalized, FILE_UPLOAD_DISMISS_TERMS);
 }
 
+async function dialogHasVisibleComposerTextbox(
+  dialog: Awaited<ReturnType<WebDriver["findElement"]>>
+): Promise<boolean> {
+  const composerTextboxes = await dialog.findElements(
+    By.css(
+      "div[role='textbox'][contenteditable='true'], [role='textbox'][contenteditable='true'], div[contenteditable='true'][data-lexical-editor='true']"
+    )
+  );
+
+  const visibilityFlags = await Promise.all(
+    composerTextboxes.map(async (textbox) => {
+      try {
+        return await textbox.isDisplayed();
+      } catch {
+        return false;
+      }
+    })
+  );
+
+  return visibilityFlags.some(Boolean);
+}
+
 async function composerHasAttachedImage(driver: WebDriver): Promise<boolean> {
   const dialogs = await driver.findElements(By.css("div[role='dialog']"));
 
@@ -2184,6 +2206,7 @@ function isLikelySubmitLabel(value: string): boolean {
 
 async function waitForComposerSubmitButton(driver: WebDriver, timeoutMs: number) {
   const timeoutAt = Date.now() + timeoutMs;
+  const exactSubmitLabels = new Set(["post", "publier", "نشر"]);
 
   while (Date.now() < timeoutAt) {
     const dialogs = await driver.findElements(By.css("div[role='dialog']"));
@@ -2197,11 +2220,23 @@ async function waitForComposerSubmitButton(driver: WebDriver, timeoutMs: number)
           continue;
         }
 
+        // Only target submit controls inside the main composer surface.
+        if (!(await dialogHasVisibleComposerTextbox(dialog))) {
+          continue;
+        }
+
         const candidates = await dialog.findElements(
           By.css(
             "[role='button'], button, div[role='button'][aria-label], span[role='button']"
           )
         );
+
+        const submitCandidates: Array<{
+          candidate: Awaited<ReturnType<WebDriver["findElement"]>>;
+          isExact: boolean;
+          y: number;
+          width: number;
+        }> = [];
 
         for (const candidate of candidates) {
           try {
@@ -2225,10 +2260,34 @@ async function waitForComposerSubmitButton(driver: WebDriver, timeoutMs: number)
               continue;
             }
 
-            return candidate;
+            const normalizedCandidateLabel = normalizeForComparison(candidateLabel);
+            const rect = await candidate.getRect().catch(() => ({ y: 0, width: 0 }));
+
+            submitCandidates.push({
+              candidate,
+              isExact: exactSubmitLabels.has(normalizedCandidateLabel),
+              y: Number(rect.y ?? 0),
+              width: Number(rect.width ?? 0),
+            });
           } catch {
             // Ignore detached candidates while Facebook re-renders the composer.
           }
+        }
+
+        if (submitCandidates.length > 0) {
+          submitCandidates.sort((left, right) => {
+            if (left.isExact !== right.isExact) {
+              return Number(right.isExact) - Number(left.isExact);
+            }
+
+            if (left.y !== right.y) {
+              return right.y - left.y;
+            }
+
+            return right.width - left.width;
+          });
+
+          return submitCandidates[0].candidate;
         }
       } catch {
         // Ignore transient dialogs while the page updates.
@@ -2651,14 +2710,47 @@ export async function publishPost(
     createPostActivatorXpaths,
     25_000
   );
-  await log("Clicking 'Create post' button");
-  await createPostActivator.click().catch(async () => {
-    await driver.executeScript("arguments[0].click();", createPostActivator);
-  });
 
-  // ΓöÇΓöÇ Step 3: Type post text ΓöÇΓöÇ
-  await log("Waiting for post composer textbox");
-  let postInput = await waitForComposerTextbox(driver, 25_000);
+  let postInput: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
+  for (let composerAttempt = 1; composerAttempt <= 3; composerAttempt += 1) {
+    const clickableActivator = (await driver.executeScript(
+      `
+        let node = arguments[0];
+        while (node && node !== document.body) {
+          const role = node.getAttribute?.("role");
+          const tag = String(node.tagName ?? "").toUpperCase();
+          if (role === "button" || tag === "BUTTON") {
+            return node;
+          }
+          node = node.parentElement;
+        }
+        return arguments[0];
+      `,
+      createPostActivator
+    )) as Awaited<ReturnType<WebDriver["findElement"]>>;
+
+    await log(
+      composerAttempt === 1
+        ? "Clicking 'Create post' button"
+        : `Clicking 'Create post' button (retry ${composerAttempt}/3)`
+    );
+
+    await clickableActivator.click().catch(async () => {
+      await driver.executeScript("arguments[0].click();", clickableActivator);
+    });
+
+    await log("Waiting for post composer textbox");
+    postInput = await waitForComposerTextbox(driver, composerAttempt === 1 ? 12_000 : 8_000).catch(() => undefined);
+    if (postInput) {
+      break;
+    }
+
+    await driver.sleep(500);
+  }
+
+  if (!postInput) {
+    throw new Error("Timed out waiting for the post composer textbox after clicking the Create Post activator.");
+  }
 
   await log(`Typing post text (${normalizedPostText.length} chars)`);
   await postInput.click();
@@ -2914,13 +3006,17 @@ export async function publishPost(
     }
 
     let dialogClosed = false;
+    let submitRetryImageReattachAttempted = false;
 
     for (let submitAttempt = 1; submitAttempt <= 3; submitAttempt += 1) {
       await log(`Submitting post (attempt ${submitAttempt}/3)`);
 
       if (requestedImageUrl && downloadedImagePath) {
         const hasAttachedImage = await composerHasAttachedImage(driver);
-        if (!hasAttachedImage) {
+        if (hasAttachedImage) {
+          imageUploadSucceeded = true;
+        } else if (!submitRetryImageReattachAttempted) {
+          submitRetryImageReattachAttempted = true;
           await log("Image appears missing before submit retry, reattaching");
           let retryInputs = await driver.findElements(By.css("div[role='dialog'] input[type='file']"));
           if (retryInputs.length === 0) {
@@ -2949,6 +3045,8 @@ export async function publishPost(
               await log("Image reattached before submit retry");
             }
           }
+        } else {
+          await log("Image still not detectable before retry, skipping repeated reattach to avoid composer reset");
         }
       }
 
@@ -2975,9 +3073,11 @@ export async function publishPost(
       if (!submitTriggered) {
         try {
           postInput = await waitForComposerTextbox(driver, 3_000).catch(() => postInput);
-          await postInput.sendKeys(Key.chord(Key.CONTROL, Key.ENTER));
-          submitTriggered = true;
-          await log("Used keyboard submit fallback (Ctrl+Enter)");
+          if (postInput) {
+            await postInput.sendKeys(Key.chord(Key.CONTROL, Key.ENTER));
+            submitTriggered = true;
+            await log("Used keyboard submit fallback (Ctrl+Enter)");
+          }
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error ?? "");
           await log("Keyboard submit fallback failed", reason.slice(0, 180));
@@ -2989,7 +3089,7 @@ export async function publishPost(
         continue;
       }
 
-      dialogClosed = await waitForComposerToClose(driver, submitAttempt === 1 ? 20_000 : 12_000);
+      dialogClosed = await waitForComposerToClose(driver, submitAttempt === 1 ? 45_000 : 25_000);
       if (dialogClosed) {
         await log("Post composer closed successfully");
         break;
@@ -3014,12 +3114,9 @@ export async function publishPost(
       }
 
       if (await dismissAddToYourPostOverlay(driver)) {
-        await log("Composer is in 'Add to your post' overlay after submit, going back");
-        dialogClosed = await waitForComposerToClose(driver, 5_000);
-        if (dialogClosed) {
-          await log("Post composer closed successfully after dismissing overlay");
-          break;
-        }
+        await log("Composer is in 'Add to your post' overlay after submit, going back to main composer");
+        postInput = await waitForComposerTextbox(driver, 8_000).catch(() => postInput);
+        await driver.sleep(600);
       }
 
       await log(`Composer still open after attempt ${submitAttempt}`);

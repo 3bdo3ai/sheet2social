@@ -169,6 +169,7 @@ const PUBLIC_IP_CHECK_ENDPOINTS = [
   "https://ipv4.icanhazip.com",
   "https://ifconfig.me/ip",
 ];
+let logWriteQueue: Promise<void> = Promise.resolve();
 const DEFAULT_AUTOMATION_SETTINGS: AutomationSettings = {
   parallelAccounts: 3,
   waitIntervalMinutes: 5,
@@ -521,7 +522,13 @@ function isTransientFileWriteError(error: unknown): boolean {
 
 function isRetryableParquetReadError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  if (code === "ERR_OUT_OF_RANGE") {
+  if (
+    code === "ERR_OUT_OF_RANGE" ||
+    code === "ENOENT" ||
+    code === "EPERM" ||
+    code === "EACCES" ||
+    code === "EBUSY"
+  ) {
     return true;
   }
 
@@ -529,7 +536,8 @@ function isRetryableParquetReadError(error: unknown): boolean {
   return (
     message.includes("out of range") ||
     message.includes("unexpected end") ||
-    message.includes("invalid parquet")
+    message.includes("invalid parquet") ||
+    message.includes("no such file or directory")
   );
 }
 
@@ -692,15 +700,26 @@ async function appendLog(log: Omit<LogRecord, "id" | "createdAt">): Promise<void
     ...log,
   };
 
-  const existing = await readParquetRows<LogRecord>(LOGS_PARQUET_PATH);
-  await writeParquetRows(LOGS_PARQUET_PATH, logsSchema, [...existing, entry]);
-
   const printable = `[${entry.level.toUpperCase()}] ${entry.message}`;
   if (entry.level === "error") {
     console.error(printable);
-    return;
+  } else {
+    console.log(printable);
   }
-  console.log(printable);
+
+  // Serialize parquet writes and swallow transient failures so logging never crashes the worker.
+  logWriteQueue = logWriteQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const existing = await readParquetRows<LogRecord>(LOGS_PARQUET_PATH);
+      await writeParquetRows(LOGS_PARQUET_PATH, logsSchema, [...existing, entry]);
+    })
+    .catch((error) => {
+      const details = error instanceof Error ? error.message : String(error ?? "Unknown log write error");
+      console.error(`[LOG-WRITE-ERROR] ${details}`);
+    });
+
+  await logWriteQueue;
 }
 
 async function isAccountEnabledInDashboard(accountId: string): Promise<boolean> {
@@ -973,26 +992,75 @@ async function setEditableText(
 }
 
 function createPostVerificationSnippet(postText: string): string {
-  const normalized = normalizeForComparison(postText);
-  return normalized.slice(0, Math.min(80, normalized.length));
+  const normalized = normalizeLooseMatch(postText);
+  return normalized.slice(0, Math.min(160, normalized.length));
+}
+
+function normalizeLooseMatch(value: string): string {
+  return normalizeForComparison(value)
+    .replace(/[^a-z0-9\u0600-\u06ff\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildWordTokens(value: string): string[] {
+  const normalized = normalizeLooseMatch(value);
+  const tokens = normalized
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+
+  return [...new Set(tokens)].slice(0, 40);
+}
+
+function scoreWordOverlap(haystack: string, needles: string[]): number {
+  if (!haystack || needles.length === 0) {
+    return 0;
+  }
+
+  let hits = 0;
+  for (const token of needles) {
+    if (haystack.includes(token)) {
+      hits += 1;
+    }
+  }
+
+  if (hits >= 10) {
+    return 16;
+  }
+
+  if (hits >= 6) {
+    return 10;
+  }
+
+  if (hits >= 3) {
+    return 4;
+  }
+
+  return hits;
 }
 
 function buildMatchFragments(value: string): string[] {
   const normalized = normalizeForComparison(value);
+  const looseNormalized = normalizeLooseMatch(value);
   const fragments = new Set<string>();
 
   if (normalized.length > 0) {
     fragments.add(normalized.slice(0, Math.min(normalized.length, 180)));
   }
 
-  for (const part of normalized.split(/[\n\r]+|[.!?]+/g)) {
+  if (looseNormalized.length > 0) {
+    fragments.add(looseNormalized.slice(0, Math.min(looseNormalized.length, 180)));
+  }
+
+  for (const part of looseNormalized.split(/[\n\r]+|[.!?]+/g)) {
     const trimmed = part.trim();
     if (trimmed.length >= 12) {
       fragments.add(trimmed.slice(0, 180));
     }
   }
 
-  const words = normalized.split(/\s+/).filter(Boolean);
+  const words = looseNormalized.split(/\s+/).filter(Boolean);
   for (let size = 4; size <= 8; size += 1) {
     for (let index = 0; index + size <= words.length; index += Math.max(1, size - 2)) {
       const fragment = words.slice(index, index + size).join(" ").trim();
@@ -1028,15 +1096,21 @@ async function resolveContainerFromStoryBlock(
 
 async function findMatchingArticle(
   driver: WebDriver,
-  expectedText: string
+  expectedText: string,
+  authorHints: string[] = []
 ): Promise<Awaited<ReturnType<WebDriver["findElement"]>>> {
-  const normalizedExpectedText = normalizeForComparison(expectedText);
+  const normalizedExpectedText = normalizeLooseMatch(expectedText);
+  const expectedWordTokens = buildWordTokens(expectedText);
   const fragments = buildMatchFragments(expectedText);
+  const normalizedAuthorHints = authorHints
+    .map((value) => normalizeLooseMatch(value))
+    .filter((value) => value.length >= 2);
+  const authorWordTokens = buildWordTokens(normalizedAuthorHints.join(" "));
 
   const storyBlocks = await driver.findElements(By.css("[data-ad-rendering-role='story_message']"));
   for (const block of storyBlocks.slice(0, 40)) {
     try {
-      const storyText = normalizeForComparison(await block.getText());
+      const storyText = normalizeLooseMatch(await block.getText());
       if (!storyText) {
         continue;
       }
@@ -1066,22 +1140,31 @@ async function findMatchingArticle(
   for (const article of articles.slice(0, 40)) {
     try {
       const articleText = normalizeForComparison(await article.getText());
+      const looseArticleText = normalizeLooseMatch(articleText);
       let score = 0;
 
-      if (articleText.includes(normalizedExpectedText)) {
+      if (looseArticleText.includes(normalizedExpectedText)) {
         score += 20;
       }
 
       for (const fragment of fragments) {
-        if (fragment.length >= 12 && articleText.includes(fragment)) {
+        if (fragment.length >= 12 && looseArticleText.includes(fragment)) {
           score += 2;
         }
       }
 
+      score += scoreWordOverlap(looseArticleText, expectedWordTokens);
+
+      if (normalizedAuthorHints.some((hint) => looseArticleText.includes(hint))) {
+        score += 12;
+      }
+
+      score += Math.min(6, scoreWordOverlap(looseArticleText, authorWordTokens));
+
       const storyTextBlocks = await article.findElements(By.css("[data-ad-rendering-role='story_message']"));
       for (const block of storyTextBlocks.slice(0, 3)) {
         try {
-          const storyText = normalizeForComparison(await block.getText());
+          const storyText = normalizeLooseMatch(await block.getText());
           if (storyText.includes(normalizedExpectedText)) {
             score += 20;
           }
@@ -1128,6 +1211,76 @@ async function findMatchingArticle(
   }
 
   throw new Error("Could not match the target posted item in the group feed.");
+}
+
+async function detectComposerAuthorHint(driver: WebDriver): Promise<string | undefined> {
+  const dialogs = await driver.findElements(By.css("div[role='dialog']"));
+  const blockedSnippets = [
+    "create post",
+    "creer une publication",
+    "post anonymously",
+    "publier de maniere anonyme",
+    "private group",
+    "groupe prive",
+    "public group",
+    "add to your post",
+    "ajouter a votre publication",
+    "photo/video",
+    "photo / video",
+    "comment",
+    "post",
+    "publier",
+    "نشر",
+  ];
+
+  for (const dialog of dialogs) {
+    try {
+      if (!(await dialog.isDisplayed())) {
+        continue;
+      }
+
+      const dialogText = normalizeForComparison(await dialog.getText());
+      const dialogLabel = normalizeForComparison((await dialog.getAttribute("aria-label")) ?? "");
+
+      if (!isComposerSurfaceText(dialogText) && !isComposerDialogLabel(dialogLabel)) {
+        continue;
+      }
+
+      if (!(await dialogHasVisibleComposerTextbox(dialog))) {
+        continue;
+      }
+
+      const lines = normalizeWhitespace(await dialog.getText())
+        .split(/\r?\n+/)
+        .map((line) => normalizeWhitespace(line))
+        .filter(Boolean);
+
+      for (const line of lines.slice(0, 16)) {
+        const normalizedLine = normalizeForComparison(line);
+        if (normalizedLine.length < 2 || normalizedLine.length > 72) {
+          continue;
+        }
+
+        if (line.split(/\s+/).length > 6) {
+          continue;
+        }
+
+        if (blockedSnippets.some((snippet) => normalizedLine.includes(snippet))) {
+          continue;
+        }
+
+        if (normalizedLine.includes("http") || normalizedLine.includes("www.")) {
+          continue;
+        }
+
+        return line;
+      }
+    } catch {
+      // Ignore transient dialog updates.
+    }
+  }
+
+  return undefined;
 }
 
 async function getCandidateContainers(
@@ -2752,6 +2905,11 @@ export async function publishPost(
     throw new Error("Timed out waiting for the post composer textbox after clicking the Create Post activator.");
   }
 
+  const composerAuthorHint = await detectComposerAuthorHint(driver).catch(() => undefined);
+  if (composerAuthorHint) {
+    await log("Detected composer author hint", composerAuthorHint.slice(0, 60));
+  }
+
   await log(`Typing post text (${normalizedPostText.length} chars)`);
   await postInput.click();
   await setEditableText(driver, postInput, normalizedPostText);
@@ -3161,13 +3319,18 @@ export async function publishPost(
     let matchedArticle: Awaited<ReturnType<WebDriver["findElement"]>> | undefined;
     let matchLookupError: string | undefined;
 
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      await driver.sleep(attempt === 1 ? 2_000 : 4_000);
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await driver.sleep(Math.min(10_000, attempt * 2_000));
       await navigateWithRetry(driver, groupUrl, 2);
       await driver.wait(until.elementLocated(By.css("body")), 20_000);
+      await driver.executeScript("window.scrollTo(0, 0);").catch(() => undefined);
 
       try {
-        matchedArticle = await findMatchingArticle(driver, expectedSnippet);
+        matchedArticle = await findMatchingArticle(
+          driver,
+          expectedSnippet,
+          composerAuthorHint ? [composerAuthorHint] : []
+        );
       } catch (error) {
         matchLookupError = error instanceof Error ? error.message : String(error ?? "");
       }
@@ -3463,7 +3626,18 @@ export async function initializeBrowser(
       options.setChromeBinaryPath(chromeBinaryPath);
     }
 
-    const driver = await new Builder().forBrowser("chrome").setChromeOptions(options).build();
+    const chromeDriverPath =
+      process.env.CHROMEDRIVER_PATH ||
+      process.env.SE_CHROMEDRIVER ||
+      process.env.WEBDRIVER_CHROME_DRIVER;
+
+    const builder = new Builder().forBrowser("chrome").setChromeOptions(options);
+
+    if (chromeDriverPath) {
+      builder.setChromeService(new chrome.ServiceBuilder(chromeDriverPath));
+    }
+
+    const driver = await builder.build();
     await driver.manage().setTimeouts({
       pageLoad: 45_000,
       script: 30_000,

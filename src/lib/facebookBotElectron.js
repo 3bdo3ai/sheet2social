@@ -373,7 +373,22 @@ async function startFacebookBot(credentials = {}, logger) {
   );
   options.excludeSwitches('enable-automation');
 
+  const chromeBinaryPath = process.env.CHROME_BINARY_PATH;
+  if (chromeBinaryPath) {
+    options.setChromeBinaryPath(chromeBinaryPath);
+  }
+
+  const chromeDriverPath =
+    process.env.CHROMEDRIVER_PATH ||
+    process.env.SE_CHROMEDRIVER ||
+    process.env.WEBDRIVER_CHROME_DRIVER;
+
   const builder = new Builder().forBrowser('chrome').setChromeOptions(options);
+
+  if (chromeDriverPath) {
+    builder.setChromeService(new chrome.ServiceBuilder(chromeDriverPath));
+  }
+
   const driver = await builder.build();
 
   try {

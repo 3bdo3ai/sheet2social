@@ -1,6 +1,6 @@
 {
-  "name": "nextjs-arabic-template",
-  "version": "1.0.0",
+  "name": "sheet2social-control-center",
+  "version": "1.0.1",
   "private": true,
   "main": "main.js",
   "scripts": {
@@ -16,12 +16,79 @@
     "license:bootstrap": "tsx scripts/bootstrap-license-admin.ts",
     "web:dev": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js dev",
     "web:build": "cross-env NODE_OPTIONS=\"--no-warnings=ExperimentalWarning\" node scripts/run-next.js build",
+    "copy:standalone": "node scripts/copy-standalone-files.js",
     "electron:dev": "node scripts/run-electron.js dev",
     "electron:start": "npm run web:build && node scripts/run-electron.js start",
-    "electron:build": "npm run web:build && electron-builder"
+    "electron:build": "npm run web:build && npm run copy:standalone && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis",
+    "build:exe": "npm run web:build && npm run copy:standalone && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis"
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "build": {
+    "appId": "com.sheet2social.app",
+    "productName": "Sheet2Social Control Center",
+    "artifactName": "${productName} Setup ${version}.${ext}",
+    "executableName": "Sheet2SocialControlCenter",
+    "asar": true,
+    "directories": {
+      "output": "dist/release"
+    },
+    "win": {
+      "icon": "public/favicon.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Sheet2Social Control Center",
+      "uninstallDisplayName": "Sheet2Social Control Center",
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "installerIcon": "public/favicon.ico",
+      "uninstallerIcon": "public/favicon.ico",
+      "installerHeaderIcon": "public/favicon.ico",
+      "installerSidebar": "public/Logo.png",
+      "uninstallerSidebar": "public/Logo.png"
+    },
+    "extraResources": [
+      {
+        "from": "dist/electron-resources/standalone",
+        "to": "app/standalone",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "dist/electron-resources/standalone-node-modules",
+        "to": "app/standalone-node-modules",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "dist/electron-resources/drivers",
+        "to": "app/drivers",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "dist/electron-resources/chrome",
+        "to": "app/chrome",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",

@@ -217,7 +217,7 @@ function assertLoginAllowed(row: LicenseKeyRow): void {
   }
 }
 
-async function bindDeviceIfNeeded(row: LicenseKeyRow, deviceId: string): Promise<LicenseKeyRow> {
+async function bindDeviceIfNeeded(row: LicenseKeyRow, deviceId: string, allowRebind: boolean): Promise<LicenseKeyRow> {
   const client = getSupabaseAdminClient();
 
   if (!row.device_id) {
@@ -254,6 +254,23 @@ async function bindDeviceIfNeeded(row: LicenseKeyRow, deviceId: string): Promise
   }
 
   if (row.device_id !== deviceId) {
+    if (allowRebind) {
+      const { data, error } = await client
+        .from("license_keys")
+        .update({ device_id: deviceId })
+        .eq("id", row.id)
+        .select("*")
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
+      if (data) {
+        return data as LicenseKeyRow;
+      }
+    }
+
     throw new LicenseAuthError(
       "device_mismatch",
       "Key is in use on another device. Please log out there first.",
@@ -264,7 +281,11 @@ async function bindDeviceIfNeeded(row: LicenseKeyRow, deviceId: string): Promise
   return row;
 }
 
-export async function createSessionForLicenseKey(keyInput: string, deviceInput: string) {
+export async function createSessionForLicenseKey(
+  keyInput: string,
+  deviceInput: string,
+  options?: { forceReplaceDevice?: boolean },
+) {
   const keyString = normalizeKey(keyInput);
   const deviceId = normalizeDeviceId(deviceInput);
 
@@ -291,7 +312,7 @@ export async function createSessionForLicenseKey(keyInput: string, deviceInput: 
     }
   }
 
-  const withDevice = await bindDeviceIfNeeded(withExpirySync, deviceId);
+  const withDevice = await bindDeviceIfNeeded(withExpirySync, deviceId, options?.forceReplaceDevice === true);
   const payload: LicenseSessionPayload = {
     licenseId: withDevice.id,
     keyString: withDevice.key_string,

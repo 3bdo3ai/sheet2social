@@ -60,16 +60,27 @@ export function LoginForm({ initialReason }: LoginFormProps) {
 
     try {
       const deviceId = getOrCreateDeviceFingerprint();
-      const response = await fetch("/api/license/login", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          keyString: cleanKey,
-          deviceId,
-        }),
-      });
+      const loginRequest = async (forceReplaceDevice: boolean) =>
+        fetch("/api/license/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            keyString: cleanKey,
+            deviceId,
+            forceReplaceDevice,
+          }),
+        });
+
+      let response = await loginRequest(false);
+
+      if (!response.ok && response.status === 409) {
+        const firstPayload = (await response.json().catch(() => ({}))) as { code?: string };
+        if (firstPayload.code === "device_mismatch") {
+          response = await loginRequest(true);
+        }
+      }
 
       if (!response.ok) {
         const payload = (await response.json().catch(() => ({}))) as { error?: string };

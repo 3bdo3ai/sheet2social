@@ -12,13 +12,17 @@ export async function POST(request: Request) {
   const payload = (await request.json()) as {
     keyString?: string;
     deviceId?: string;
+    forceReplaceDevice?: boolean;
   };
 
   const keyString = payload.keyString?.trim() ?? "";
   const deviceId = payload.deviceId?.trim() ?? "";
+  const forceReplaceDevice = payload.forceReplaceDevice === true;
 
   try {
-    const { token, session } = await createSessionForLicenseKey(keyString, deviceId);
+    const { token, session } = await createSessionForLicenseKey(keyString, deviceId, {
+      forceReplaceDevice,
+    });
     const response = NextResponse.json({ session });
     setLicenseSessionCookie(response, token, request);
     return response;

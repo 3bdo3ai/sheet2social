@@ -14,6 +14,12 @@ import type { IWebDriverOptionsCookie, WebDriver } from "selenium-webdriver";
 import chrome from "selenium-webdriver/chrome";
 import parquet from "parquetjs-lite";
 
+import {
+  getRuntimeDataDir,
+  getRuntimeStorageDir,
+  getRuntimeTraceDir,
+  isUserDataRuntime,
+} from "../src/lib/runtimePaths";
 import { parseTwoFactorInput } from "../src/lib/twoFactor";
 
 interface FbAccountRecord {
@@ -120,6 +126,7 @@ interface AutomationSettings {
 interface AutomationConfig {
   state: StateValue;
   settings: AutomationSettings;
+  updatedAt: string;
 }
 
 type ParquetField = {
@@ -133,7 +140,7 @@ const STOP_CHECK_INTERVAL_MS = 1_000;
 const ACTION_BLOCK_COOLDOWN_MS =
   Math.max(5, Number.parseInt(process.env.WORKER_ACTION_BLOCK_COOLDOWN_MINUTES ?? "45", 10) || 45) * 60_000;
 const AUTO_DISABLE_ACCOUNT_ON_ACTION_BLOCK = process.env.WORKER_AUTO_DISABLE_ON_LIMIT === "true";
-const STORAGE_DIR = path.join(process.cwd(), "storage");
+const STORAGE_DIR = getRuntimeStorageDir();
 const AUTOMATION_STATE_PATH = path.join(STORAGE_DIR, "automation_state.json");
 const LOGS_PARQUET_PATH = path.join(STORAGE_DIR, "logs.parquet");
 const FB_ACCOUNTS_PARQUET_PATH = path.join(STORAGE_DIR, "fbAccounts.parquet");
@@ -156,8 +163,8 @@ const DEBUG_BROWSER_HOLD_MS = Math.max(
 const DEBUG_BROWSER_HOLD_FAILURE_ONLY =
   process.env.WORKER_DEBUG_BROWSER_HOLD_FAILURE_ONLY !== "false";
 const TEMP_IMAGE_DIR = path.join(os.tmpdir(), "sheet2social-worker");
-const SCREENSHOT_PUBLIC_DIR = path.join(process.cwd(), "public", "automation-trace");
-const SCREENSHOT_PUBLIC_ROUTE = "/automation-trace";
+const SCREENSHOT_OUTPUT_DIR = getRuntimeTraceDir();
+const SCREENSHOT_REFERENCE_PREFIX = "/automation-trace";
 const MAX_TRACE_SCREENSHOTS = 220;
 const PARQUET_READ_RETRY_COUNT = 3;
 const PARQUET_RETRY_DELAY_MS = 35;
@@ -469,22 +476,32 @@ async function readAutomationConfig(): Promise<AutomationConfig> {
     const payload = JSON.parse(content) as {
       state?: string;
       settings?: Partial<AutomationSettings>;
+      updatedAt?: string;
     };
 
     return {
       state: toStateValue(payload.state),
       settings: normalizeAutomationSettings(payload.settings),
+      updatedAt:
+        typeof payload.updatedAt === "string" && payload.updatedAt.trim().length > 0
+          ? payload.updatedAt
+          : new Date(0).toISOString(),
     };
   } catch {
     return {
       state: "stopped",
       settings: DEFAULT_AUTOMATION_SETTINGS,
+      updatedAt: new Date(0).toISOString(),
     };
   }
 }
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildAutomationControlToken(config: AutomationConfig): string {
+  return `${config.state}:${config.updatedAt}`;
 }
 
 async function isAutomationRunning(): Promise<boolean> {
@@ -813,7 +830,7 @@ function sanitizeTraceLabel(label: string): string {
 
 async function cleanupTraceScreenshots(): Promise<void> {
   try {
-    const files = await fs.readdir(SCREENSHOT_PUBLIC_DIR);
+    const files = await fs.readdir(SCREENSHOT_OUTPUT_DIR);
     const pngFiles = files.filter((file) => file.toLowerCase().endsWith(".png"));
 
     if (pngFiles.length <= MAX_TRACE_SCREENSHOTS) {
@@ -822,7 +839,7 @@ async function cleanupTraceScreenshots(): Promise<void> {
 
     const withStats = await Promise.all(
       pngFiles.map(async (fileName) => {
-        const absolutePath = path.join(SCREENSHOT_PUBLIC_DIR, fileName);
+        const absolutePath = path.join(SCREENSHOT_OUTPUT_DIR, fileName);
         const stat = await fs.stat(absolutePath);
         return {
           absolutePath,
@@ -848,16 +865,20 @@ async function captureScreenshot(driver: WebDriver, label: string): Promise<stri
   }
 
   try {
-    await fs.mkdir(SCREENSHOT_PUBLIC_DIR, { recursive: true });
+    await fs.mkdir(SCREENSHOT_OUTPUT_DIR, { recursive: true });
     const screenshot = await driver.takeScreenshot();
     const fileName = `${Date.now()}-${sanitizeTraceLabel(label)}.png`;
-    const filePath = path.join(SCREENSHOT_PUBLIC_DIR, fileName);
+    const filePath = path.join(SCREENSHOT_OUTPUT_DIR, fileName);
     await fs.writeFile(filePath, screenshot, "base64");
 
     // Keep trace storage bounded so long runs do not grow without limit.
     void cleanupTraceScreenshots();
 
-    return `${SCREENSHOT_PUBLIC_ROUTE}/${fileName}`;
+    if (isUserDataRuntime()) {
+      return filePath;
+    }
+
+    return `${SCREENSHOT_REFERENCE_PREFIX}/${fileName}`;
   } catch {
     return undefined;
   }
@@ -1481,10 +1502,19 @@ function describeProxy(proxyConfig: ProxyConfig | undefined): string {
   return `${proxyConfig.host}:${proxyConfig.port}`;
 }
 
+function resolveWorkerDataPath(inputPath: string): string {
+  const raw = String(inputPath ?? "").replace(/\\/g, "/").trim();
+  if (!raw) {
+    return getRuntimeDataDir();
+  }
+
+  const normalized = raw.replace(/^\.?\//, "");
+  const relativeToData = normalized.startsWith("data/") ? normalized.slice("data/".length) : normalized;
+  return path.join(getRuntimeDataDir(), relativeToData);
+}
+
 function resolveCsvPath(csvFilePath: string): string {
-  return path.isAbsolute(csvFilePath)
-    ? csvFilePath
-    : path.join(process.cwd(), csvFilePath);
+  return path.isAbsolute(csvFilePath) ? csvFilePath : resolveWorkerDataPath(csvFilePath);
 }
 
 function normalizeStatus(value: string): string {
@@ -2663,15 +2693,20 @@ async function downloadImageToTemp(imageUrl: string, driver?: WebDriver): Promis
     throw new Error("imageUrl is empty");
   }
 
+  const isRemoteUrl = /^https?:\/\//i.test(normalizedImageUrl);
   const candidatePath = path.isAbsolute(normalizedImageUrl)
     ? normalizedImageUrl
-    : path.join(process.cwd(), normalizedImageUrl);
+    : isRemoteUrl
+      ? ""
+      : resolveWorkerDataPath(normalizedImageUrl);
 
-  try {
-    await fs.access(candidatePath);
-    return candidatePath;
-  } catch {
-    // Continue with remote URL fetch fallback.
+  if (candidatePath) {
+    try {
+      await fs.access(candidatePath);
+      return candidatePath;
+    } catch {
+      // Continue with remote URL fetch fallback.
+    }
   }
 
   await fs.mkdir(TEMP_IMAGE_DIR, { recursive: true });
@@ -4956,8 +4991,15 @@ async function processGroupPosts(
   }
 }
 
-async function runCycle(): Promise<number> {
+interface CycleResult {
+  nextDelayMs: number;
+  controlToken: string;
+}
+
+async function runCycle(): Promise<CycleResult> {
   const automation = await readAutomationConfig();
+  const controlToken = buildAutomationControlToken(automation);
+
   if (automation.state !== "running") {
     if (lastObservedAutomationState !== "stopped") {
       await appendLog({
@@ -4968,7 +5010,10 @@ async function runCycle(): Promise<number> {
 
     readyAccountSessions.clear();
     lastObservedAutomationState = "stopped";
-    return STOPPED_POLL_INTERVAL_MS;
+    return {
+      nextDelayMs: STOPPED_POLL_INTERVAL_MS,
+      controlToken,
+    };
   }
 
   const isFreshAutomationStart = lastObservedAutomationState !== "running";
@@ -5052,7 +5097,10 @@ async function runCycle(): Promise<number> {
       message: "No active accounts or groups found for automation.",
       details: diagnostics || undefined,
     });
-    return STOPPED_POLL_INTERVAL_MS;
+    return {
+      nextDelayMs: STOPPED_POLL_INTERVAL_MS,
+      controlToken,
+    };
   }
 
   const selectedAccountsById = new Map<string, FbAccountRecord>();
@@ -5103,9 +5151,12 @@ async function runCycle(): Promise<number> {
       message: "All selected accounts are in temporary cooldown due to Facebook limits. Waiting for cooldown expiry.",
     });
 
-    return Number.isFinite(soonestMs)
-      ? Math.max(STOPPED_POLL_INTERVAL_MS, Math.min(POLL_INTERVAL_MS, soonestMs))
-      : STOPPED_POLL_INTERVAL_MS;
+    return {
+      nextDelayMs: Number.isFinite(soonestMs)
+        ? Math.max(STOPPED_POLL_INTERVAL_MS, Math.min(POLL_INTERVAL_MS, soonestMs))
+        : STOPPED_POLL_INTERVAL_MS,
+      controlToken,
+    };
   }
 
   if (isFreshAutomationStart) {
@@ -5160,7 +5211,10 @@ async function runCycle(): Promise<number> {
       level: "error",
       message: "No selected account passed session preflight. Posting cycle aborted.",
     });
-    return STOPPED_POLL_INTERVAL_MS;
+    return {
+      nextDelayMs: STOPPED_POLL_INTERVAL_MS,
+      controlToken,
+    };
   }
 
   let remainingSessionQuota = Math.max(1, automation.settings.postsPerSession);
@@ -5379,7 +5433,39 @@ async function runCycle(): Promise<number> {
     });
   }
 
-  return Math.max(10_000, automation.settings.waitIntervalMinutes * 60_000);
+  return {
+    nextDelayMs: Math.max(10_000, automation.settings.waitIntervalMinutes * 60_000),
+    controlToken,
+  };
+}
+
+async function waitForDelayOrControlTokenChange(
+  delayMs: number,
+  baselineControlToken: string
+): Promise<void> {
+  const boundedDelayMs = Math.max(0, Math.floor(delayMs));
+  if (boundedDelayMs === 0) {
+    return;
+  }
+
+  const deadline = Date.now() + boundedDelayMs;
+  while (Date.now() < deadline) {
+    const remainingMs = deadline - Date.now();
+    await sleep(Math.min(STOP_CHECK_INTERVAL_MS, remainingMs));
+
+    if (!baselineControlToken) {
+      continue;
+    }
+
+    try {
+      const latest = await readAutomationConfig();
+      if (buildAutomationControlToken(latest) !== baselineControlToken) {
+        return;
+      }
+    } catch {
+      // Keep waiting on transient read errors.
+    }
+  }
 }
 
 async function startWorker(): Promise<void> {
@@ -5417,30 +5503,35 @@ async function startWorker(): Promise<void> {
   }
 
   const controllerLoop = async (): Promise<void> => {
-    let nextDelayMs = POLL_INTERVAL_MS;
+    while (true) {
+      let cycleResult: CycleResult = {
+        nextDelayMs: POLL_INTERVAL_MS,
+        controlToken: "",
+      };
 
-    try {
-      nextDelayMs = await runCycle();
-    } catch (error) {
-      const details =
-        error instanceof Error ? error.stack ?? error.message : "Unknown worker cycle error";
-      await appendLog({
-        level: "error",
-        message: "Worker cycle failed unexpectedly.",
-        details,
-      });
-      nextDelayMs = POLL_INTERVAL_MS;
-    }
-
-    setTimeout(() => {
-      controllerLoop().catch(async (error) => {
+      try {
+        cycleResult = await runCycle();
+      } catch (error) {
+        const details =
+          error instanceof Error ? error.stack ?? error.message : "Unknown worker cycle error";
         await appendLog({
           level: "error",
-          message: "Worker controller loop crashed unexpectedly.",
-          details: error instanceof Error ? error.stack ?? error.message : "Unknown loop error",
+          message: "Worker cycle failed unexpectedly.",
+          details,
         });
-      });
-    }, nextDelayMs);
+
+        const fallbackState = await readAutomationConfig().catch(() => undefined);
+        cycleResult = {
+          nextDelayMs: POLL_INTERVAL_MS,
+          controlToken: fallbackState ? buildAutomationControlToken(fallbackState) : "",
+        };
+      }
+
+      await waitForDelayOrControlTokenChange(
+        cycleResult.nextDelayMs,
+        cycleResult.controlToken
+      );
+    }
   };
 
   await controllerLoop();

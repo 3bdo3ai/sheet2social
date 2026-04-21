@@ -3,10 +3,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { readAutomationState, writeAutomationState } from "@/lib/db";
+import { getRuntimeStorageDir } from "@/lib/runtimePaths";
 
 export const runtime = "nodejs";
 
-const WORKER_LOCK_PATH = path.join(process.cwd(), "storage", "worker.lock");
+const WORKER_LOCK_PATH = path.join(/*turbopackIgnore: true*/ getRuntimeStorageDir(), "worker.lock");
 
 async function terminateWorkerFromLock(): Promise<number | null> {
   try {

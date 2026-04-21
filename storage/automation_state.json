@@ -1,5 +1,5 @@
 {
-  "state": "running",
+  "state": "stopped",
   "settings": {
     "parallelAccounts": 3,
     "waitIntervalMinutes": 120,
@@ -10,5 +10,5 @@
     "commentWithPostImage": false,
     "proxyRotationEnabled": false
   },
-  "updatedAt": "2026-04-15T02:54:48.123Z"
+  "updatedAt": "2026-04-15T20:51:41.685Z"
 }

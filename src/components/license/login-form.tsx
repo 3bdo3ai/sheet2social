@@ -49,8 +49,8 @@ export function LoginForm({ initialReason }: LoginFormProps) {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const normalizedKey = keyString.trim();
-    if (normalizedKey.length !== 24) {
+    const cleanKey = keyString.trim();
+    if (cleanKey.length !== 24) {
       setError("Please enter a valid 24-character key.");
       return;
     }
@@ -66,7 +66,7 @@ export function LoginForm({ initialReason }: LoginFormProps) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          keyString: normalizedKey,
+          keyString: cleanKey,
           deviceId,
         }),
       });
@@ -88,8 +88,9 @@ export function LoginForm({ initialReason }: LoginFormProps) {
       }
 
       router.refresh();
-    } catch {
-      setError("Network error while validating your key. Please try again.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Network error while validating your key. Please try again.";
+      setError(message);
     } finally {
       setSubmitting(false);
     }

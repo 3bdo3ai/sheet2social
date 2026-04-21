@@ -101,10 +101,11 @@ function toSessionView(row: LicenseKeyRow, isAdmin: boolean): LicenseSessionView
 
 async function getLicenseById(id: string): Promise<LicenseKeyRow | null> {
   const client = getSupabaseAdminClient();
-  const { data, error } = await client.from("license_keys").select("*").eq("id", id).maybeSingle();
+  const { data, error: dbError } = await client.from("license_keys").select("*").eq("id", id).maybeSingle();
 
-  if (error && !isNoRowsError(error)) {
-    throw error;
+  if (dbError && !isNoRowsError(dbError)) {
+    console.error("Supabase Error Details:", dbError);
+    throw dbError;
   }
 
   return (data as LicenseKeyRow | null) ?? null;
@@ -112,14 +113,15 @@ async function getLicenseById(id: string): Promise<LicenseKeyRow | null> {
 
 async function getLicenseByKeyString(keyString: string): Promise<LicenseKeyRow | null> {
   const client = getSupabaseAdminClient();
-  const { data, error } = await client
+  const { data, error: dbError } = await client
     .from("license_keys")
     .select("*")
     .eq("key_string", keyString)
     .maybeSingle();
 
-  if (error && !isNoRowsError(error)) {
-    throw error;
+  if (dbError && !isNoRowsError(dbError)) {
+    console.error("Supabase Error Details:", dbError);
+    throw dbError;
   }
 
   return (data as LicenseKeyRow | null) ?? null;

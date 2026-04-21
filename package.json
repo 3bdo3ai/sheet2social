@@ -1,6 +1,6 @@
 {
   "name": "sheet2social-control-center",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "private": true,
   "main": "main.js",
   "scripts": {
@@ -31,9 +31,23 @@
     "artifactName": "${productName} Setup ${version}.${ext}",
     "executableName": "Sheet2SocialControlCenter",
     "asar": true,
+    "asarUnpack": [
+      "dist/electron-resources/**"
+    ],
     "directories": {
       "output": "dist/release"
     },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "dist/electron-resources/**/*",
+      "!node_modules/**/*",
+      "!.next/**/*",
+      "!src/**/*",
+      "!worker/**/*",
+      "!dist/release/**/*"
+    ],
     "win": {
       "icon": "public/favicon.ico",
       "signAndEditExecutable": false,
@@ -53,42 +67,14 @@
       "uninstallDisplayName": "Sheet2Social Control Center",
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
+      "include": "build/installer.nsh",
       "installerIcon": "public/favicon.ico",
       "uninstallerIcon": "public/favicon.ico",
       "installerHeaderIcon": "public/favicon.ico",
       "installerSidebar": "public/Logo.png",
       "uninstallerSidebar": "public/Logo.png"
     },
-    "extraResources": [
-      {
-        "from": "dist/electron-resources/standalone",
-        "to": "app/standalone",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "dist/electron-resources/standalone-node-modules",
-        "to": "app/standalone-node-modules",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "dist/electron-resources/drivers",
-        "to": "app/drivers",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "dist/electron-resources/chrome",
-        "to": "app/chrome",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ]
+    "extraResources": []
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",

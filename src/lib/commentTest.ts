@@ -13,6 +13,7 @@ import { anonymizeProxy, closeAnonymizedProxy } from "proxy-chain";
 import { isCsvPostCompleted, readCsvPosts } from "@/lib/csvPosts";
 import { readParquetRecords } from "@/lib/db";
 import type { FbAccount, FbGroup, ProxyRecord } from "@/lib/db/entities";
+import { getRuntimeStorageDir, getRuntimeTraceDir, isUserDataRuntime } from "@/lib/runtimePaths";
 
 type ProxyProtocol = "socks5" | "http";
 
@@ -73,10 +74,10 @@ interface ProxyTarget {
   protocols: ProxyProtocol[];
 }
 
-const STORAGE_DIR = path.join(process.cwd(), "storage");
+const STORAGE_DIR = getRuntimeStorageDir();
 const SESSION_STORE_PATH = path.join(STORAGE_DIR, "facebook_sessions.json");
 const COMMENT_TEST_DUMP_DIR = path.join(STORAGE_DIR, "comment-test-dumps");
-const TRACE_PUBLIC_DIR = path.join(process.cwd(), "public", "automation-trace");
+const TRACE_PUBLIC_DIR = getRuntimeTraceDir();
 const TRACE_PUBLIC_ROUTE = "/automation-trace";
 
 function sanitizeTraceLabel(value: string): string {
@@ -99,6 +100,11 @@ async function captureTraceScreenshot(driver: WebDriver, label: string): Promise
     const fileName = `${Date.now()}-${sanitizeTraceLabel(label)}.png`;
     const filePath = path.join(TRACE_PUBLIC_DIR, fileName);
     await fs.writeFile(filePath, screenshot, "base64");
+
+    if (isUserDataRuntime()) {
+      return filePath;
+    }
+
     return `${TRACE_PUBLIC_ROUTE}/${fileName}`;
   } catch {
     return undefined;

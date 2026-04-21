@@ -14,10 +14,11 @@ import {
 import type { FbGroup } from "@/lib/db";
 import { parseBooleanCsvValue, parseCsv, validateCsvHeaders } from "@/lib/csvImport";
 import { ensureCsvFile } from "@/lib/csvPosts";
+import { getRuntimeCsvDir } from "@/lib/runtimePaths";
 
 export const runtime = "nodejs";
 
-const CSV_DIRECTORY = path.join(process.cwd(), "data", "csvs");
+const CSV_DIRECTORY = getRuntimeCsvDir();
 
 function normalizeAssignedAccountIds(input: unknown): string[] {
   if (Array.isArray(input)) {

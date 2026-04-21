@@ -16,6 +16,7 @@ export default function PanelLayout({ children }: { children: ReactNode }) {
           <p className="text-xs text-[#9ecbff]">Automation Control Center</p>
         </div>
         <button
+          type="button"
           onClick={() => setMenuOpen((prev) => !prev)}
           className="btn-subtle inline-flex items-center justify-center"
           aria-label="Toggle navigation menu"
@@ -26,6 +27,7 @@ export default function PanelLayout({ children }: { children: ReactNode }) {
 
       {menuOpen ? (
         <button
+          type="button"
           onClick={() => setMenuOpen(false)}
           className="fixed inset-0 z-40 bg-[#020711]/70 xl:hidden"
           aria-label="Close menu overlay"
@@ -35,7 +37,9 @@ export default function PanelLayout({ children }: { children: ReactNode }) {
       <div className="grid min-h-screen w-full grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)]">
         <aside
           className={`luxury-panel fixed left-3 top-3 z-50 h-[calc(100vh-1.5rem)] w-[min(88vw,320px)] overflow-auto rounded-2xl p-4 transition-transform duration-200 xl:sticky xl:left-auto xl:top-0 xl:z-20 xl:h-screen xl:w-full xl:translate-x-0 xl:overflow-y-auto xl:rounded-none xl:border-r xl:border-[var(--border)] xl:p-5 ${
-            menuOpen ? "translate-x-0" : "-translate-x-[120%]"
+            menuOpen
+              ? "translate-x-0 pointer-events-auto"
+              : "-translate-x-[120%] pointer-events-none xl:pointer-events-auto"
           }`}
         >
           <div className="mb-5 flex items-start justify-between border-b border-[var(--border)] pb-4">
@@ -44,6 +48,7 @@ export default function PanelLayout({ children }: { children: ReactNode }) {
               <p className="mt-1 text-xs text-[#9ecbff]">Automation Control Center</p>
             </div>
             <button
+              type="button"
               onClick={() => setMenuOpen(false)}
               className="btn-subtle inline-flex items-center justify-center xl:hidden"
               aria-label="Close sidebar"

@@ -6,8 +6,9 @@ import parquet from "parquetjs-lite";
 
 import type { EntityMap, EntityName } from "@/lib/db/entities";
 import { entitySchemas } from "@/lib/db/schemas";
+import { getRuntimeStorageDir } from "@/lib/runtimePaths";
 
-const STORAGE_DIR = path.join(process.cwd(), "storage");
+const STORAGE_DIR = getRuntimeStorageDir();
 const PARQUET_READ_RETRY_COUNT = 3;
 const PARQUET_READ_RETRY_DELAY_MS = 35;
 

@@ -3,18 +3,73 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
-const { startFacebookBot } = require('./src/lib/facebookBotElectron');
 
 const DEFAULT_SERVER_PORT = Number.parseInt(process.env.PORT ?? '3000', 10) || 3000;
 const PRODUCTION_HOST = '127.0.0.1';
 const SERVER_READY_TIMEOUT_MS = 120_000;
 const SERVER_READY_POLL_MS = 500;
 const SERVER_REQUEST_TIMEOUT_MS = 2_000;
+const RUNTIME_ENV_KEYS = {
+  userDataDir: 'SHEET2SOCIAL_USER_DATA_DIR',
+  storageDir: 'SHEET2SOCIAL_STORAGE_DIR',
+  dataDir: 'SHEET2SOCIAL_DATA_DIR',
+  csvDir: 'SHEET2SOCIAL_CSV_DIR',
+  imageDir: 'SHEET2SOCIAL_IMAGE_DIR',
+  traceDir: 'SHEET2SOCIAL_TRACE_DIR',
+};
+const DEFAULT_AUTOMATION_STATE = {
+  state: 'stopped',
+  settings: {
+    parallelAccounts: 3,
+    waitIntervalMinutes: 5,
+    delayBetweenAccountsMinutes: 1,
+    postsPerGroup: 1,
+    maxPostsPerAccountPerCycle: 10,
+    postsPerSession: 20,
+    commentWithPostImage: false,
+    proxyRotationEnabled: false,
+  },
+};
 
 let nextServerProcess = null;
+let workerProcess = null;
+let workerRestartAttempts = 0;
 let isAppShuttingDown = false;
 let hasRunShutdown = false;
 let nextServerLogFilePath = null;
+let cachedStartFacebookBot = undefined;
+
+function resolveFacebookBotModuleCandidates() {
+  return [
+    path.join(__dirname, 'src', 'lib', 'facebookBotElectron.js'),
+    path.join(process.cwd(), 'src', 'lib', 'facebookBotElectron.js'),
+  ];
+}
+
+function resolveStartFacebookBot() {
+  if (cachedStartFacebookBot !== undefined) {
+    return cachedStartFacebookBot;
+  }
+
+  for (const candidate of resolveFacebookBotModuleCandidates()) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+
+    try {
+      const moduleValue = require(candidate);
+      if (typeof moduleValue.startFacebookBot === 'function') {
+        cachedStartFacebookBot = moduleValue.startFacebookBot;
+        return cachedStartFacebookBot;
+      }
+    } catch {
+      // Ignore invalid module candidates and keep searching.
+    }
+  }
+
+  cachedStartFacebookBot = null;
+  return cachedStartFacebookBot;
+}
 
 function resolveFirstExistingPath(candidates) {
   for (const candidate of candidates) {
@@ -28,6 +83,10 @@ function resolveFirstExistingPath(candidates) {
 
 function resolvePackagedStandaloneDirCandidates() {
   return [
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'electron-resources', 'standalone'),
+    path.join(process.resourcesPath, 'app.asar', 'dist', 'electron-resources', 'standalone'),
+    path.join(process.resourcesPath, 'app', 'dist', 'electron-resources', 'standalone'),
+    path.join(process.resourcesPath, 'dist', 'electron-resources', 'standalone'),
     path.join(process.resourcesPath, 'app', 'standalone'),
     path.join(process.resourcesPath, 'standalone'),
   ];
@@ -48,11 +107,42 @@ function resolvePackagedServerEntry() {
 
 function resolvePackagedStandaloneModulePathCandidates() {
   return [
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'electron-resources', 'standalone-node-modules'),
+    path.join(process.resourcesPath, 'app.asar', 'dist', 'electron-resources', 'standalone-node-modules'),
+    path.join(process.resourcesPath, 'app', 'dist', 'electron-resources', 'standalone-node-modules'),
+    path.join(process.resourcesPath, 'dist', 'electron-resources', 'standalone-node-modules'),
     path.join(process.resourcesPath, 'app', 'standalone', 'node_modules'),
     path.join(process.resourcesPath, 'standalone', 'node_modules'),
     path.join(process.resourcesPath, 'app', 'standalone-node-modules'),
     path.join(process.resourcesPath, 'standalone-node-modules'),
   ];
+}
+
+function resolvePackagedWorkerModulePathCandidates() {
+  return [
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'electron-resources', 'worker-node-modules'),
+    path.join(process.resourcesPath, 'app.asar', 'dist', 'electron-resources', 'worker-node-modules'),
+    path.join(process.resourcesPath, 'app', 'dist', 'electron-resources', 'worker-node-modules'),
+    path.join(process.resourcesPath, 'dist', 'electron-resources', 'worker-node-modules'),
+    ...resolvePackagedStandaloneModulePathCandidates(),
+  ];
+}
+
+function resolvePackagedWorkerEntryCandidates() {
+  return [
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'electron-resources', 'worker-runtime', 'worker', 'engine.js'),
+    path.join(process.resourcesPath, 'app.asar', 'dist', 'electron-resources', 'worker-runtime', 'worker', 'engine.js'),
+    path.join(process.resourcesPath, 'app', 'dist', 'electron-resources', 'worker-runtime', 'worker', 'engine.js'),
+    path.join(process.resourcesPath, 'dist', 'electron-resources', 'worker-runtime', 'worker', 'engine.js'),
+  ];
+}
+
+function resolvePackagedWorkerEntry() {
+  const candidates = resolvePackagedWorkerEntryCandidates();
+  return {
+    workerEntry: resolveFirstExistingPath(candidates),
+    candidates,
+  };
 }
 
 function applyNodePath(targetEnv, modulePaths) {
@@ -69,6 +159,10 @@ function applyNodePath(targetEnv, modulePaths) {
 
 function resolvePackagedChromedriverPath() {
   return resolveFirstExistingPath([
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'electron-resources', 'drivers', 'chromedriver.exe'),
+    path.join(process.resourcesPath, 'app.asar', 'dist', 'electron-resources', 'drivers', 'chromedriver.exe'),
+    path.join(process.resourcesPath, 'app', 'dist', 'electron-resources', 'drivers', 'chromedriver.exe'),
+    path.join(process.resourcesPath, 'dist', 'electron-resources', 'drivers', 'chromedriver.exe'),
     path.join(process.resourcesPath, 'app', 'drivers', 'chromedriver.exe'),
     path.join(process.resourcesPath, 'app', 'chromedriver.exe'),
     path.join(process.resourcesPath, 'drivers', 'chromedriver.exe'),
@@ -77,12 +171,30 @@ function resolvePackagedChromedriverPath() {
 
 function resolvePackagedChromeBinaryPath() {
   return resolveFirstExistingPath([
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'electron-resources', 'chrome', 'chrome.exe'),
+    path.join(process.resourcesPath, 'app.asar', 'dist', 'electron-resources', 'chrome', 'chrome.exe'),
+    path.join(process.resourcesPath, 'app', 'dist', 'electron-resources', 'chrome', 'chrome.exe'),
+    path.join(process.resourcesPath, 'dist', 'electron-resources', 'chrome', 'chrome.exe'),
     path.join(process.resourcesPath, 'app', 'chrome', 'chrome.exe'),
     path.join(process.resourcesPath, 'app', 'chrome-win64', 'chrome.exe'),
     path.join(process.resourcesPath, 'app', 'drivers', 'chrome.exe'),
     path.join(process.resourcesPath, 'app', 'drivers', 'chrome', 'chrome.exe'),
     path.join(process.resourcesPath, 'app', 'drivers', 'chrome-win64', 'chrome.exe'),
   ]);
+}
+
+function resolveWindowIconPath() {
+  const candidates = app.isPackaged
+    ? [
+        path.join(resolvePackagedStandaloneDir(), 'public', 'favicon.ico'),
+        path.join(process.resourcesPath, 'app', 'public', 'favicon.ico'),
+      ]
+    : [
+        path.join(__dirname, 'public', 'favicon.ico'),
+        path.join(process.cwd(), 'public', 'favicon.ico'),
+      ];
+
+  return resolveFirstExistingPath(candidates) ?? candidates[0];
 }
 
 function applyBundledBrowserEnv(targetEnv) {
@@ -103,6 +215,78 @@ function applyBundledBrowserEnv(targetEnv) {
     chromeBinaryPath,
     chromedriverPath,
   };
+}
+
+function resolveRuntimeUserDataPaths() {
+  const userDataDir = app.getPath('userData');
+  const storageDir = path.join(userDataDir, 'storage');
+  const dataDir = path.join(userDataDir, 'data');
+  const csvDir = path.join(dataDir, 'csvs');
+  const imageDir = path.join(dataDir, 'images');
+  const traceDir = path.join(storageDir, 'automation-trace');
+
+  return {
+    userDataDir,
+    storageDir,
+    dataDir,
+    csvDir,
+    imageDir,
+    traceDir,
+  };
+}
+
+function applyRuntimeDataEnv(targetEnv) {
+  const runtimePaths = resolveRuntimeUserDataPaths();
+  targetEnv[RUNTIME_ENV_KEYS.userDataDir] = runtimePaths.userDataDir;
+  targetEnv[RUNTIME_ENV_KEYS.storageDir] = runtimePaths.storageDir;
+  targetEnv[RUNTIME_ENV_KEYS.dataDir] = runtimePaths.dataDir;
+  targetEnv[RUNTIME_ENV_KEYS.csvDir] = runtimePaths.csvDir;
+  targetEnv[RUNTIME_ENV_KEYS.imageDir] = runtimePaths.imageDir;
+  targetEnv[RUNTIME_ENV_KEYS.traceDir] = runtimePaths.traceDir;
+  return runtimePaths;
+}
+
+async function writeFileIfMissing(filePath, content) {
+  try {
+    await fs.promises.access(filePath);
+    return;
+  } catch {
+    // Seed missing first-run files.
+  }
+
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.writeFile(filePath, content, 'utf8');
+}
+
+async function ensurePackagedUserDataStructure() {
+  if (!app.isPackaged) {
+    return;
+  }
+
+  const runtimePaths = applyRuntimeDataEnv(process.env);
+
+  await Promise.all([
+    fs.promises.mkdir(runtimePaths.storageDir, { recursive: true }),
+    fs.promises.mkdir(runtimePaths.csvDir, { recursive: true }),
+    fs.promises.mkdir(runtimePaths.imageDir, { recursive: true }),
+    fs.promises.mkdir(runtimePaths.traceDir, { recursive: true }),
+    fs.promises.mkdir(path.join(runtimePaths.storageDir, 'comment-test-dumps'), { recursive: true }),
+  ]);
+
+  await Promise.all([
+    writeFileIfMissing(
+      path.join(runtimePaths.storageDir, 'automation_state.json'),
+      `${JSON.stringify(DEFAULT_AUTOMATION_STATE, null, 2)}\n`
+    ),
+    writeFileIfMissing(path.join(runtimePaths.storageDir, 'facebook_sessions.json'), '{}\n'),
+    writeFileIfMissing(path.join(runtimePaths.storageDir, 'comment-test-last-run.json'), '{}\n'),
+    writeFileIfMissing(path.join(runtimePaths.storageDir, 'comment-test-last-inspect.json'), '{}\n'),
+  ]);
+
+  const line =
+    `[electron] Using userData runtime paths: storage=${runtimePaths.storageDir}, data=${runtimePaths.dataDir}`;
+  console.log(line);
+  appendNextServerLogLine(line);
 }
 
 function delay(ms) {
@@ -348,6 +532,8 @@ async function startProductionServer() {
     NEXT_TELEMETRY_DISABLED: '1',
   };
 
+  applyRuntimeDataEnv(serverEnv);
+
   const browserPaths = applyBundledBrowserEnv(serverEnv);
   const modulePaths = resolvePackagedStandaloneModulePathCandidates().filter((candidate) => fs.existsSync(candidate));
   if (modulePaths.length > 0) {
@@ -411,9 +597,122 @@ async function startProductionServer() {
   return serverUrl;
 }
 
+async function startProductionWorker() {
+  if (!app.isPackaged) {
+    return;
+  }
+
+  if (workerProcess && workerProcess.exitCode === null && !workerProcess.killed) {
+    return;
+  }
+
+  const { workerEntry, candidates } = resolvePackagedWorkerEntry();
+  if (!workerEntry) {
+    const message = `[worker-engine] Worker entrypoint was not found. Checked: ${candidates.join(', ')}`;
+    console.error(message);
+    appendNextServerLogLine(message);
+    return;
+  }
+
+  const workerEnv = {
+    ...process.env,
+    NODE_ENV: 'production',
+    ELECTRON_RUN_AS_NODE: '1',
+    NEXT_TELEMETRY_DISABLED: '1',
+  };
+
+  applyRuntimeDataEnv(workerEnv);
+  const browserPaths = applyBundledBrowserEnv(workerEnv);
+  const modulePaths = resolvePackagedWorkerModulePathCandidates().filter((candidate) => fs.existsSync(candidate));
+  if (modulePaths.length > 0) {
+    applyNodePath(workerEnv, modulePaths);
+    const message = `[worker-engine] Using module paths: ${modulePaths.join(', ')}`;
+    console.log(message);
+    appendNextServerLogLine(message);
+  }
+
+  const launchMessage = `[worker-engine] Starting packaged worker from ${workerEntry}`;
+  console.log(launchMessage);
+  appendNextServerLogLine(launchMessage);
+
+  workerProcess = spawn(process.execPath, [workerEntry], {
+    cwd: path.dirname(workerEntry),
+    env: workerEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  const startedAt = Date.now();
+  pipeChildOutput(workerProcess, 'worker-engine');
+
+  if (browserPaths.chromedriverPath) {
+    const message = `[worker-engine] Using chromedriver at ${browserPaths.chromedriverPath}`;
+    console.log(message);
+    appendNextServerLogLine(message);
+  }
+
+  if (browserPaths.chromeBinaryPath) {
+    const message = `[worker-engine] Using Chrome binary at ${browserPaths.chromeBinaryPath}`;
+    console.log(message);
+    appendNextServerLogLine(message);
+  }
+
+  workerProcess.on('error', (error) => {
+    const message = error instanceof Error ? error.stack || error.message : String(error);
+    const logLine = `[worker-engine] Failed to spawn process: ${message}`;
+    console.error(logLine);
+    appendNextServerLogLine(logLine);
+  });
+
+  workerProcess.on('close', (code, signal) => {
+    const runtimeMs = Date.now() - startedAt;
+    workerProcess = null;
+
+    if (isAppShuttingDown) {
+      return;
+    }
+
+    if (runtimeMs > 30_000) {
+      workerRestartAttempts = 0;
+    }
+
+    workerRestartAttempts += 1;
+    const delayMs = Math.min(8_000, 1_000 * workerRestartAttempts);
+    const logLine =
+      `[worker-engine] Process exited (code=${code ?? 'null'}, signal=${signal ?? 'null'}). ` +
+      `Restarting in ${delayMs}ms.`;
+    console.warn(logLine);
+    appendNextServerLogLine(logLine);
+
+    setTimeout(() => {
+      if (isAppShuttingDown) {
+        return;
+      }
+
+      startProductionWorker().catch((error) => {
+        const message = error instanceof Error ? error.stack || error.message : String(error);
+        const restartErrorLine = `[worker-engine] Restart attempt failed: ${message}`;
+        console.error(restartErrorLine);
+        appendNextServerLogLine(restartErrorLine);
+      });
+    }, delayMs);
+  });
+}
+
 async function stopProductionServer() {
   const child = nextServerProcess;
   nextServerProcess = null;
+
+  if (!child || child.killed) {
+    return;
+  }
+
+  await killProcessTree(child.pid).catch(() => undefined);
+}
+
+async function stopProductionWorker() {
+  const child = workerProcess;
+  workerProcess = null;
 
   if (!child || child.killed) {
     return;
@@ -438,6 +737,11 @@ ipcMain.handle('startFacebookBot', async (event, credentials = {}) => {
 
   try {
     pushLog('Starting Facebook bot workflow...');
+    const startFacebookBot = resolveStartFacebookBot();
+    if (typeof startFacebookBot !== 'function') {
+      throw new Error('Facebook bot module is not bundled in this build.');
+    }
+
     return await startFacebookBot(credentials, pushLog);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -452,6 +756,8 @@ async function createMainWindow() {
     width: 1280,
     height: 800,
     show: false,
+    icon: resolveWindowIconPath(),
+    autoHideMenuBar: true,
     backgroundColor: '#101114',
     webPreferences: {
       nodeIntegration: false,
@@ -459,6 +765,11 @@ async function createMainWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+
+  if (process.platform !== 'darwin') {
+    mainWindow.removeMenu();
+    mainWindow.setMenuBarVisibility(false);
+  }
 
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow.isDestroyed()) {
@@ -489,13 +800,16 @@ async function shutdownApp() {
 
   hasRunShutdown = true;
   isAppShuttingDown = true;
+  await stopProductionWorker();
   await stopProductionServer();
   app.exit(0);
 }
 
 app.whenReady().then(async () => {
   if (app.isPackaged) {
+    await ensurePackagedUserDataStructure();
     applyBundledBrowserEnv(process.env);
+    await startProductionWorker();
   }
 
   await createMainWindow();

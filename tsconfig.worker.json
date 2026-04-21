@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": false,
+    "incremental": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "target": "ES2022",
+    "isolatedModules": false,
+    "plugins": []
+  },
+  "include": [
+    "worker/engine.ts",
+    "src/lib/runtimePaths.ts",
+    "src/lib/twoFactor.ts",
+    "src/types/parquetjs-lite.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

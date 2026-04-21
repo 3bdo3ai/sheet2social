@@ -6,6 +6,7 @@ import path from "node:path";
 
 import csvParser from "csv-parser";
 import { createObjectCsvWriter } from "csv-writer";
+import { getRuntimeCsvDir } from "@/lib/runtimePaths";
 
 export interface CsvPostRecord {
   post_text: string;
@@ -25,7 +26,7 @@ const CSV_HEADERS: Array<keyof CsvPostRecord> = [
   "status",
 ];
 
-const CSV_BASE_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "csvs");
+const CSV_BASE_DIR = getRuntimeCsvDir();
 
 function resolveCsvPath(csvFilePath: string): string {
   const normalized = csvFilePath.replace(/\\/g, "/").trim();

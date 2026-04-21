@@ -10,6 +10,7 @@ import type { IWebDriverOptionsCookie, WebDriver } from "selenium-webdriver";
 import chrome from "selenium-webdriver/chrome";
 
 import { readParquetRecords } from "@/lib/db";
+import { getRuntimeStorageDir } from "@/lib/runtimePaths";
 import { parseTwoFactorInput, type TwoFactorSource } from "@/lib/twoFactor";
 
 type FbAccountRecord = {
@@ -80,7 +81,7 @@ export type FacebookSessionStatus =
   | { hasSession: false; reason: "no-cookies" | "cookies-only"; cookieCount: number }
   | { hasSession: true; reason: "auth-cookies-present"; cookieCount: number };
 
-const STORAGE_DIR = path.join(process.cwd(), "storage");
+const STORAGE_DIR = getRuntimeStorageDir();
 const SESSION_STORE_PATH = path.join(STORAGE_DIR, "facebook_sessions.json");
 const MOBILE_FACEBOOK_USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";

@@ -2,6 +2,7 @@ import "server-only";
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { getRuntimeStorageDir } from "@/lib/runtimePaths";
 
 export type AutomationState = "running" | "stopped";
 
@@ -22,7 +23,7 @@ export interface AutomationStateRecord {
   updatedAt: string;
 }
 
-const STORAGE_DIR = path.join(process.cwd(), "storage");
+const STORAGE_DIR = getRuntimeStorageDir();
 const AUTOMATION_STATE_PATH = path.join(STORAGE_DIR, "automation_state.json");
 const DEFAULT_AUTOMATION_STATE: AutomationStateRecord = {
   state: "stopped",

@@ -13,10 +13,11 @@ import {
 } from "@/lib/csvPosts";
 import { parseCsv, normalizeCsvHeader } from "@/lib/csvImport";
 import { initializeDbStorage, readParquetRecords } from "@/lib/db";
+import { getRuntimeImageDir } from "@/lib/runtimePaths";
 
 export const runtime = "nodejs";
 
-const IMAGE_DIR = path.join(process.cwd(), "data", "images");
+const IMAGE_DIR = getRuntimeImageDir();
 
 export async function GET() {
   await initializeDbStorage();

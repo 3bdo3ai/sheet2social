@@ -254,28 +254,22 @@ async function bindDeviceIfNeeded(row: LicenseKeyRow, deviceId: string, allowReb
   }
 
   if (row.device_id !== deviceId) {
-    if (allowRebind) {
-      const { data, error } = await client
-        .from("license_keys")
-        .update({ device_id: deviceId })
-        .eq("id", row.id)
-        .select("*")
-        .maybeSingle();
+    const { data, error } = await client
+      .from("license_keys")
+      .update({ device_id: deviceId })
+      .eq("id", row.id)
+      .select("*")
+      .maybeSingle();
 
-      if (error) {
-        throw error;
-      }
-
-      if (data) {
-        return data as LicenseKeyRow;
-      }
+    if (error) {
+      throw error;
     }
 
-    throw new LicenseAuthError(
-      "device_mismatch",
-      "Key is in use on another device. Please log out there first.",
-      409,
-    );
+    if (data) {
+      return data as LicenseKeyRow;
+    }
+
+    throw new LicenseAuthError("invalid_session", "Unable to update device binding.", 500);
   }
 
   return row;

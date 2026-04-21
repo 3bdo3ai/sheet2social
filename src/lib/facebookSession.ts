@@ -984,22 +984,29 @@ async function loginAndCaptureSession(
 }
 
 function resolveChromedriverPath(): string | undefined {
-  const { existsSync, readdirSync } = require("node:fs") as typeof import("fs");
+  const { existsSync, readdirSync, statSync } = require("node:fs") as typeof import("fs");
+  const isWindows = process.platform === "win32";
 
-  // 1. Project-bundled driver – checked in first so the app works on any machine
-  //    without needing selenium-manager or a user-level cache.
-  const bundled = path.join(process.cwd(), "drivers", "chromedriver.exe");
-  if (existsSync(bundled)) return bundled;
-
-  // Also check relative to the Next.js project root (in case cwd() is virtualized)
+  // 1. Explicit env override
   const candidates: string[] = [];
-
-  // 2. Explicit env override
   if (process.env.CHROMEDRIVER_PATH) {
     candidates.push(process.env.CHROMEDRIVER_PATH);
   }
 
-  // 3. Well-known selenium-manager cache locations on Windows
+  // 2. Project-bundled driver on Windows only.
+  // The repository ships a Windows chromedriver.exe for desktop/Electron flows.
+  // Linux servers must not try to execute it.
+  if (isWindows) {
+    const bundled = path.join(process.cwd(), "drivers", "chromedriver.exe");
+    if (existsSync(bundled)) return bundled;
+  }
+
+  // 3. Common Linux/macOS system installs.
+  for (const candidate of ["/usr/bin/chromedriver", "/usr/local/bin/chromedriver", "/snap/bin/chromedriver"]) {
+    candidates.push(candidate);
+  }
+
+  // 4. Well-known selenium-manager cache locations on Windows
   const homeDir = process.env.USERPROFILE ?? process.env.HOME ?? "";
   for (const subDir of ["win64", "windows"]) {
     candidates.push(path.join(homeDir, ".cache", "selenium", "chromedriver", subDir));
@@ -1007,14 +1014,21 @@ function resolveChromedriverPath(): string | undefined {
 
   for (const candidate of candidates) {
     if (!candidate) continue;
-    // Direct path (env var case)
-    if (candidate.endsWith(".exe") && existsSync(candidate)) return candidate;
-    // Directory case – pick newest version
+    // Direct file path case (env var or installed driver)
+    try {
+      if (existsSync(candidate) && statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // ignore and fall through to directory handling
+    }
+
+    // Directory case – pick newest version from selenium-manager cache
     try {
       if (!existsSync(candidate)) continue;
       const versions = readdirSync(candidate).sort().reverse();
       for (const ver of versions) {
-        const full = path.join(candidate, ver, "chromedriver.exe");
+        const full = path.join(candidate, ver, isWindows ? "chromedriver.exe" : "chromedriver");
         if (existsSync(full)) return full;
       }
     } catch {

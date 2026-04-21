@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Cairo } from "next/font/google";
 import "./globals.css";
+import { ExtensionMessageHandler } from "@/components/extension-message-handler";
 
 const cairo = Cairo({ 
   subsets: ["arabic", "latin"],
@@ -21,6 +22,7 @@ export default function RootLayout({
   return (
     <html lang="en" dir="ltr" data-scroll-behavior="smooth">
       <body className={`${cairo.variable} antialiased`}>
+        <ExtensionMessageHandler />
         {children}
       </body>
     </html>

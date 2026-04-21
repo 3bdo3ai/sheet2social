@@ -58,29 +58,19 @@ function resolveLicenseCookieSecureFlag(request?: CookieRequestContext): boolean
     return false;
   }
 
-  if (process.env.NODE_ENV !== "production") {
-    return false;
-  }
-
   const forwardedProto = request?.headers
     .get("x-forwarded-proto")
     ?.split(",")[0]
     ?.trim()
     .toLowerCase();
 
-  if (forwardedProto === "https") {
-    return true;
-  }
-
   if (forwardedProto === "http") {
     return false;
   }
 
-  try {
-    return request?.url ? new URL(request.url).protocol === "https:" : true;
-  } catch {
-    return true;
-  }
+  // Default to non-secure so HTTP/self-hosted deployments keep sessions working
+  // unless operators explicitly force secure cookies with LICENSE_COOKIE_SECURE=true.
+  return false;
 }
 
 function getAdminKeySet(): Set<string> {

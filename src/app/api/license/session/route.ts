@@ -7,14 +7,14 @@ import {
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
   const validation = await validateSessionFromCookies();
 
   if (!validation.ok) {
     const response = NextResponse.json({ error: validation.message, reason: validation.reason }, { status: validation.statusCode });
 
     if (validation.reason !== "missing_session") {
-      clearLicenseSessionCookie(response);
+      clearLicenseSessionCookie(response, request);
     }
 
     return response;

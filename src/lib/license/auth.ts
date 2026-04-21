@@ -12,6 +12,8 @@ import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 45;
 
+type CookieRequestContext = Pick<Request, "headers" | "url">;
+
 type ValidationFailureReason =
   | "missing_session"
   | "invalid_session"
@@ -42,6 +44,42 @@ export class LicenseAuthError extends Error {
     public readonly statusCode = 400,
   ) {
     super(message);
+  }
+}
+
+function resolveLicenseCookieSecureFlag(request?: CookieRequestContext): boolean {
+  const explicit = process.env.LICENSE_COOKIE_SECURE?.trim().toLowerCase();
+
+  if (explicit === "true") {
+    return true;
+  }
+
+  if (explicit === "false") {
+    return false;
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    return false;
+  }
+
+  const forwardedProto = request?.headers
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    ?.trim()
+    .toLowerCase();
+
+  if (forwardedProto === "https") {
+    return true;
+  }
+
+  if (forwardedProto === "http") {
+    return false;
+  }
+
+  try {
+    return request?.url ? new URL(request.url).protocol === "https:" : true;
+  } catch {
+    return true;
   }
 }
 
@@ -268,24 +306,24 @@ export async function createSessionForLicenseKey(keyInput: string, deviceInput: 
   return { token, session };
 }
 
-export function setLicenseSessionCookie(response: NextResponse, token: string): void {
+export function setLicenseSessionCookie(response: NextResponse, token: string, request?: CookieRequestContext): void {
   response.cookies.set({
     name: LICENSE_SESSION_COOKIE,
     value: token,
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: resolveLicenseCookieSecureFlag(request),
     sameSite: "lax",
     path: "/",
     maxAge: SESSION_MAX_AGE_SECONDS,
   });
 }
 
-export function clearLicenseSessionCookie(response: NextResponse): void {
+export function clearLicenseSessionCookie(response: NextResponse, request?: CookieRequestContext): void {
   response.cookies.set({
     name: LICENSE_SESSION_COOKIE,
     value: "",
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: resolveLicenseCookieSecureFlag(request),
     sameSite: "lax",
     path: "/",
     maxAge: 0,

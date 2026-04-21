@@ -7,10 +7,10 @@ import {
 
 export const runtime = "nodejs";
 
-export async function POST() {
+export async function POST(request: Request) {
   await markCurrentSessionExpiredIfPastDue();
 
   const response = NextResponse.json({ success: true });
-  clearLicenseSessionCookie(response);
+  clearLicenseSessionCookie(response, request);
   return response;
 }

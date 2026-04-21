@@ -20,7 +20,7 @@ export async function POST(request: Request) {
   try {
     const { token, session } = await createSessionForLicenseKey(keyString, deviceId);
     const response = NextResponse.json({ session });
-    setLicenseSessionCookie(response, token);
+    setLicenseSessionCookie(response, token, request);
     return response;
   } catch (error) {
     if (error instanceof LicenseAuthError) {

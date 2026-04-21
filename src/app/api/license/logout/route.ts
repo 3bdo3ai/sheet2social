@@ -15,6 +15,6 @@ export async function POST(request: Request) {
   }
 
   const response = NextResponse.json({ success: true });
-  clearLicenseSessionCookie(response);
+  clearLicenseSessionCookie(response, request);
   return response;
 }

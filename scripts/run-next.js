@@ -3,12 +3,47 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadEnvConfig } = require('@next/env');
 
 const args = process.argv.slice(2);
+const projectRoot = process.cwd();
+const isDevCommand = args[0] === 'dev';
+loadEnvConfig(projectRoot, isDevCommand, console, true);
+
 const nextBin = require.resolve('next/dist/bin/next');
-const standaloneServerEntry = path.join(process.cwd(), '.next', 'standalone', 'server.js');
-const standaloneStaticDir = path.join(process.cwd(), '.next', 'standalone', '.next', 'static');
-const appStaticDir = path.join(process.cwd(), '.next', 'static');
+const standaloneServerEntry = path.join(projectRoot, '.next', 'standalone', 'server.js');
+const standaloneRootDir = path.join(projectRoot, '.next', 'standalone');
+const standaloneStaticDir = path.join(standaloneRootDir, '.next', 'static');
+const appStaticDir = path.join(projectRoot, '.next', 'static');
+const envFiles = ['.env.local', '.env.production', '.env'];
+
+function syncEnvFilesToStandalone() {
+  if (!fs.existsSync(standaloneRootDir)) {
+    return false;
+  }
+
+  let copiedAny = false;
+
+  for (const envFile of envFiles) {
+    const srcPath = path.join(projectRoot, envFile);
+    const destPath = path.join(standaloneRootDir, envFile);
+
+    if (!fs.existsSync(srcPath)) {
+      continue;
+    }
+
+    try {
+      fs.copyFileSync(srcPath, destPath);
+      copiedAny = true;
+    } catch (error) {
+      console.warn(
+        `[run-next] Failed to sync ${envFile} to standalone: ${error instanceof Error ? error.message : error}`
+      );
+    }
+  }
+
+  return copiedAny;
+}
 
 function ensureStandaloneStaticAssets() {
   if (!fs.existsSync(appStaticDir)) {
@@ -32,6 +67,7 @@ const isStandaloneStartCommand = args[0] === 'start' && args.length === 1;
 
 if (isStandaloneStartCommand && fs.existsSync(standaloneServerEntry)) {
   ensureStandaloneStaticAssets();
+  syncEnvFilesToStandalone();
 }
 
 const shouldUseStandaloneStart =

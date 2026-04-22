@@ -1,9 +1,21 @@
 #!/usr/bin/env node
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const args = process.argv.slice(2);
 const nextBin = require.resolve('next/dist/bin/next');
+const standaloneServerEntry = path.join(process.cwd(), '.next', 'standalone', 'server.js');
+
+const shouldUseStandaloneStart =
+  args[0] === 'start' && args.length === 1 && fs.existsSync(standaloneServerEntry);
+
+if (args[0] === 'start' && args.length === 1 && !shouldUseStandaloneStart) {
+  console.warn(
+    '[run-next] Standalone server entry was not found. Falling back to "next start". Run "npm run build" first.'
+  );
+}
 
 const shouldDropLine = (line) =>
   line.includes('[baseline-browser-mapping] The data in this module is over two months old.') ||
@@ -37,15 +49,26 @@ let shuttingDown = false;
 let workerProcess = null;
 let workerRestartAttempts = 0;
 
-const child = spawn(process.execPath, [nextBin, ...args], {
-  env: process.env,
-  stdio: ['inherit', 'pipe', 'pipe'],
-});
+const child = shouldUseStandaloneStart
+  ? spawn(process.execPath, [standaloneServerEntry], {
+      env: process.env,
+      stdio: ['inherit', 'pipe', 'pipe'],
+    })
+  : spawn(process.execPath, [nextBin, ...args], {
+      env: process.env,
+      stdio: ['inherit', 'pipe', 'pipe'],
+    });
 
-forwardWithFilter(child.stdout, (text) => process.stdout.write(text));
-forwardWithFilter(child.stderr, (text) => process.stderr.write(text));
+if (shouldUseStandaloneStart) {
+  console.log('[run-next] Starting Next.js from .next/standalone/server.js');
+}
 
-child.on('close', (code, signal) => {
+const nextChild = child;
+
+forwardWithFilter(nextChild.stdout, (text) => process.stdout.write(text));
+forwardWithFilter(nextChild.stderr, (text) => process.stderr.write(text));
+
+nextChild.on('close', (code, signal) => {
   shuttingDown = true;
   if (workerProcess && !workerProcess.killed) {
     workerProcess.kill('SIGTERM');
@@ -141,8 +164,8 @@ if (args[0] === 'dev' || args[0] === 'start') {
     if (workerProcess && !workerProcess.killed) {
       workerProcess.kill('SIGTERM');
     }
-    if (!child.killed) {
-      child.kill('SIGTERM');
+    if (!nextChild.killed) {
+      nextChild.kill('SIGTERM');
     }
   };
 

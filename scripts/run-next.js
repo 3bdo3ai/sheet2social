@@ -7,9 +7,35 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 const nextBin = require.resolve('next/dist/bin/next');
 const standaloneServerEntry = path.join(process.cwd(), '.next', 'standalone', 'server.js');
+const standaloneStaticDir = path.join(process.cwd(), '.next', 'standalone', '.next', 'static');
+const appStaticDir = path.join(process.cwd(), '.next', 'static');
+
+function ensureStandaloneStaticAssets() {
+  if (!fs.existsSync(appStaticDir)) {
+    console.warn('[run-next] Root static assets were not found at .next/static.');
+    return false;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(standaloneStaticDir), { recursive: true });
+    fs.cpSync(appStaticDir, standaloneStaticDir, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    console.warn(
+      `[run-next] Failed to sync standalone static assets: ${error instanceof Error ? error.message : error}`
+    );
+    return false;
+  }
+}
+
+const isStandaloneStartCommand = args[0] === 'start' && args.length === 1;
+
+if (isStandaloneStartCommand && fs.existsSync(standaloneServerEntry)) {
+  ensureStandaloneStaticAssets();
+}
 
 const shouldUseStandaloneStart =
-  args[0] === 'start' && args.length === 1 && fs.existsSync(standaloneServerEntry);
+  isStandaloneStartCommand && fs.existsSync(standaloneServerEntry);
 
 if (args[0] === 'start' && args.length === 1 && !shouldUseStandaloneStart) {
   console.warn(

@@ -71,6 +71,41 @@ type BrowserInitializationResult = {
   proxyPublicIp?: string;
 };
 
+function hasDisplayServer(): boolean {
+  return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+function hasInteractiveDesktopSession(): boolean {
+  if (process.platform !== "linux") {
+    return true;
+  }
+
+  return hasDisplayServer();
+}
+
+function shouldRunHeadless(): boolean {
+  const explicit = (process.env.CHROME_HEADLESS ?? "").trim().toLowerCase();
+  const linuxWithoutDisplay = process.platform === "linux" && !hasDisplayServer();
+
+  if (explicit === "true" || explicit === "1" || explicit === "yes") {
+    return true;
+  }
+
+  if (explicit === "false" || explicit === "0" || explicit === "no") {
+    if (linuxWithoutDisplay) {
+      console.warn(
+        "[facebookSession] CHROME_HEADLESS=false ignored because no display server is detected. Forcing headless mode."
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  // Default to headless on Linux servers with no display manager.
+  return linuxWithoutDisplay;
+}
+
 export type FacebookLoginAttemptResult = {
   hasSession: boolean;
   message: string;
@@ -83,6 +118,7 @@ export type FacebookSessionStatus =
 
 const STORAGE_DIR = getRuntimeStorageDir();
 const SESSION_STORE_PATH = path.join(STORAGE_DIR, "facebook_sessions.json");
+const CHROMEDRIVER_LOG_PATH = path.join(STORAGE_DIR, "chromedriver.log");
 const MOBILE_FACEBOOK_USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 const FACEBOOK_LOGIN_WAIT_MS = 60_000;
@@ -1039,15 +1075,52 @@ function resolveChromedriverPath(): string | undefined {
   return undefined;
 }
 
+async function resolveChromeBinaryPath(): Promise<string | undefined> {
+  const configuredPath = process.env.CHROME_BINARY_PATH?.trim();
+
+  if (!configuredPath) {
+    return undefined;
+  }
+
+  try {
+    await fs.access(configuredPath);
+    return configuredPath;
+  } catch {
+    console.warn(
+      `[facebookSession] Ignoring CHROME_BINARY_PATH because it is not accessible on this host: ${configuredPath}`
+    );
+    return undefined;
+  }
+}
+
+function normalizeBrowserStartupErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "Unknown browser startup error";
+
+  if (/cannot find chrome binary|no chrome binary/i.test(raw)) {
+    return "Chrome binary was not found. Install Google Chrome/Chromium and set CHROME_BINARY_PATH to a valid executable.";
+  }
+
+  if (/only supports chrome version|this version of chromedriver/i.test(raw)) {
+    return "ChromeDriver does not match the installed Chrome version. Install matching versions or unset CHROMEDRIVER_PATH to use Selenium Manager.";
+  }
+
+  if (/chrome instance exited|devtoolsactiveport|failed to start.*exited/i.test(raw)) {
+    return "Chrome exited immediately after launch. On VPS this usually means missing GUI requirements for headed mode or incompatible Chrome startup flags.";
+  }
+
+  return raw;
+}
+
 
 async function initializeBrowser(
   proxyConfig: ProxyConfig | undefined,
-  sessionCookies: IWebDriverOptionsCookie[]
+  sessionCookies: IWebDriverOptionsCookie[],
+  initOptions?: { forceHeaded?: boolean }
 ): Promise<BrowserInitializationResult> {
-  const options = new chrome.Options();
+  const driverOptions = new chrome.Options();
   let proxyExtensionDir: string | undefined;
 
-  options.addArguments(
+  driverOptions.addArguments(
     "--disable-gpu",
     "--window-size=390,844",
     `--user-agent=${MOBILE_FACEBOOK_USER_AGENT}`,
@@ -1056,42 +1129,50 @@ async function initializeBrowser(
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process"
   );
-  options.excludeSwitches("enable-automation");
+  driverOptions.excludeSwitches("enable-automation");
+
+  if (!initOptions?.forceHeaded && shouldRunHeadless()) {
+    driverOptions.addArguments("--headless=new");
+  }
 
   if (proxyConfig) {
     if (proxyConfig.username && proxyConfig.password) {
       proxyExtensionDir = await createProxyAuthExtension(proxyConfig);
-      options.addArguments(`--disable-extensions-except=${proxyExtensionDir}`);
-      options.addArguments(`--load-extension=${proxyExtensionDir}`);
+      driverOptions.addArguments(`--disable-extensions-except=${proxyExtensionDir}`);
+      driverOptions.addArguments(`--load-extension=${proxyExtensionDir}`);
     } else {
-      options.addArguments(`--proxy-server=http://${proxyConfig.host}:${proxyConfig.port}`);
+      driverOptions.addArguments(`--proxy-server=http://${proxyConfig.host}:${proxyConfig.port}`);
     }
   }
 
-  const chromeBinaryPath = process.env.CHROME_BINARY_PATH;
+  const chromeBinaryPath = await resolveChromeBinaryPath();
   if (chromeBinaryPath) {
-    options.setChromeBinaryPath(chromeBinaryPath);
+    driverOptions.setChromeBinaryPath(chromeBinaryPath);
   }
+
+  await ensureStorageDir();
 
   // Resolve chromedriver explicitly to avoid selenium-manager path virtualisation
   // in Next.js server routes (\ ROOT\ ... error).
   const chromedriverPath = resolveChromedriverPath();
-  const service = chromedriverPath ? new chrome.ServiceBuilder(chromedriverPath) : undefined;
+  const service = chromedriverPath
+    ? new chrome.ServiceBuilder(chromedriverPath)
+    : new chrome.ServiceBuilder();
+  service.enableVerboseLogging();
+  service.loggingTo(CHROMEDRIVER_LOG_PATH);
 
   let driver: WebDriver;
   try {
-    const builder = new Builder().forBrowser("chrome").setChromeOptions(options);
-    if (service) {
-      builder.setChromeService(service);
-    }
+    const builder = new Builder().forBrowser("chrome").setChromeOptions(driverOptions);
+    builder.setChromeService(service);
     driver = await builder.build();
   } catch (error) {
     if (proxyExtensionDir) {
       await fs.rm(proxyExtensionDir, { recursive: true, force: true }).catch(() => undefined);
     }
 
-    const message = error instanceof Error ? error.message : "Unknown browser startup error";
-    throw new Error(`Unable to start browser session: ${message}`);
+    const message = normalizeBrowserStartupErrorMessage(error);
+    throw new Error(`Unable to start browser session: ${message} ChromeDriver log: ${CHROMEDRIVER_LOG_PATH}`);
   }
 
   let proxyPublicIp: string | undefined;
@@ -1179,6 +1260,12 @@ export async function startManualFacebookAccountLogin(
 ): Promise<{ accountId: string; manualLoginId: string; message: string; proxyPublicIp?: string }> {
   await cleanupExpiredManualLoginSessions();
 
+  if (!hasInteractiveDesktopSession()) {
+    throw new Error(
+      "Manual Popup Login requires a graphical desktop session. This VPS is running headless. Use Try Auto Login, or configure a display server (Xvfb) and set DISPLAY."
+    );
+  }
+
   const accounts = await readParquetRecords("fbAccounts");
   const account = accounts.find((item) => item.id === accountId) as FbAccountRecord | undefined;
   if (!account) {
@@ -1189,7 +1276,9 @@ export async function startManualFacebookAccountLogin(
   let browser: BrowserInitializationResult | undefined;
 
   try {
-    browser = await initializeBrowser(proxyConfig, await getStoredSessionCookies(account.id));
+    browser = await initializeBrowser(proxyConfig, await getStoredSessionCookies(account.id), {
+      forceHeaded: true,
+    });
     await browser.driver.get("https://m.facebook.com/login");
     await browser.driver.wait(until.elementLocated(By.css("body")), 15_000);
 

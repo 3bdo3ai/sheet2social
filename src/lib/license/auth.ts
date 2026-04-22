@@ -48,29 +48,46 @@ export class LicenseAuthError extends Error {
 }
 
 function resolveLicenseCookieSecureFlag(request?: CookieRequestContext): boolean {
+  const requestProto = (() => {
+    const forwardedProto = request?.headers
+      .get("x-forwarded-proto")
+      ?.split(",")[0]
+      ?.trim()
+      .toLowerCase();
+
+    if (forwardedProto === "http" || forwardedProto === "https") {
+      return forwardedProto;
+    }
+
+    if (!request?.url) {
+      return undefined;
+    }
+
+    try {
+      const protocol = new URL(request.url).protocol.toLowerCase();
+      if (protocol === "http:" || protocol === "https:") {
+        return protocol.slice(0, -1);
+      }
+    } catch {
+      return undefined;
+    }
+
+    return undefined;
+  })();
+
   const explicit = process.env.LICENSE_COOKIE_SECURE?.trim().toLowerCase();
 
   if (explicit === "true") {
-    return true;
+    // Keep secure cookies disabled when the active request is plain HTTP
+    // to avoid missing_session loops on non-TLS self-hosted deployments.
+    return requestProto !== "http";
   }
 
   if (explicit === "false") {
     return false;
   }
 
-  const forwardedProto = request?.headers
-    .get("x-forwarded-proto")
-    ?.split(",")[0]
-    ?.trim()
-    .toLowerCase();
-
-  if (forwardedProto === "http") {
-    return false;
-  }
-
-  // Default to non-secure so HTTP/self-hosted deployments keep sessions working
-  // unless operators explicitly force secure cookies with LICENSE_COOKIE_SECURE=true.
-  return false;
+  return requestProto === "https";
 }
 
 function getAdminKeySet(): Set<string> {
@@ -244,10 +261,19 @@ async function bindDeviceIfNeeded(row: LicenseKeyRow, deviceId: string, allowReb
   }
 
   if (row.device_id !== deviceId) {
+    if (!allowRebind) {
+      throw new LicenseAuthError(
+        "device_mismatch",
+        "Key is in use on another device. Please log out there first.",
+        409,
+      );
+    }
+
     const { data, error } = await client
       .from("license_keys")
       .update({ device_id: deviceId })
       .eq("id", row.id)
+      .eq("device_id", row.device_id)
       .select("*")
       .maybeSingle();
 
@@ -259,7 +285,20 @@ async function bindDeviceIfNeeded(row: LicenseKeyRow, deviceId: string, allowReb
       return data as LicenseKeyRow;
     }
 
-    throw new LicenseAuthError("invalid_session", "Unable to update device binding.", 500);
+    const refreshed = await getLicenseById(row.id);
+    if (!refreshed) {
+      throw new LicenseAuthError("invalid_key", "License key not found.", 401);
+    }
+
+    if (!refreshed.device_id || refreshed.device_id !== deviceId) {
+      throw new LicenseAuthError(
+        "device_mismatch",
+        "Key is in use on another device. Please log out there first.",
+        409,
+      );
+    }
+
+    return refreshed;
   }
 
   return row;

@@ -58,7 +58,28 @@ export async function POST(request: Request) {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to start manual login";
-      return NextResponse.json({ error: message }, { status: 400 });
+
+      if (message.includes("requires a graphical desktop session")) {
+        return NextResponse.json(
+          {
+            error: message,
+            code: "manual_login_headless",
+          },
+          { status: 409 }
+        );
+      }
+
+      if (message.startsWith("Unable to start browser session:")) {
+        return NextResponse.json(
+          {
+            error: message,
+            code: "browser_startup_failed",
+          },
+          { status: 502 }
+        );
+      }
+
+      return NextResponse.json({ error: message, code: "manual_login_start_failed" }, { status: 400 });
     }
   }
 

@@ -31,6 +31,62 @@ function isCompletedPostStatus(status: string): boolean {
   return normalized === "posted" || normalized === "done" || normalized === "completed" || normalized === "success";
 }
 
+function getPostStatusCategory(status: string): "pending" | "processing" | "done" | "failed" {
+  const normalized = normalizePostStatus(status);
+
+  if (!normalized) {
+    return "pending";
+  }
+
+  if (isCompletedPostStatus(normalized)) {
+    return "done";
+  }
+
+  if (normalized.startsWith("failed")) {
+    return "failed";
+  }
+
+  if (normalized.startsWith("processing")) {
+    return "processing";
+  }
+
+  return "pending";
+}
+
+function humanizeStatusReason(reason: string): string {
+  return reason
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatPostStatus(status: string): string {
+  const normalized = normalizePostStatus(status);
+
+  if (!normalized) {
+    return "Pending";
+  }
+
+  if (isCompletedPostStatus(normalized)) {
+    return "Done";
+  }
+
+  if (normalized === "failed:empty-post-text") {
+    return "Failed: Empty Post Text";
+  }
+
+  if (normalized.startsWith("failed:")) {
+    return `Failed: ${humanizeStatusReason(normalized.slice("failed:".length))}`;
+  }
+
+  if (normalized.startsWith("processing")) {
+    return "Processing";
+  }
+
+  return status;
+}
+
 function imageUrlPreview(url: string, maxLength = 84): string {
   const normalized = url.trim();
   if (normalized.length <= maxLength) {
@@ -195,7 +251,7 @@ export default function PostsPage() {
           .includes(normalizedSearch)
       : true;
     const byGroup = groupFilter === "all" ? true : post.groupId === groupFilter;
-    const postStatus = isCompletedPostStatus(post.status) ? "done" : normalizePostStatus(post.status) || "pending";
+    const postStatus = getPostStatusCategory(post.status);
     const byStatus = statusFilter === "all" ? true : postStatus === statusFilter;
     return bySearch && byGroup && byStatus;
   });
@@ -210,7 +266,6 @@ export default function PostsPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="app-title">Posts Management</h1>
-          <p className="app-subtitle">Create and manage your posts</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={downloadTemplate} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">
@@ -251,6 +306,7 @@ export default function PostsPage() {
         <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="modal-input">
           <option value="all">All Status</option>
           <option value="pending">Pending</option>
+          <option value="processing">Processing</option>
           <option value="done">Done</option>
           <option value="failed">Failed</option>
         </select>
@@ -335,7 +391,7 @@ export default function PostsPage() {
                         className="modal-input"
                       />
                     ) : (
-                      post.status || "Pending"
+                      formatPostStatus(post.status)
                     )}
                   </td>
                   <td className="px-4 py-3">

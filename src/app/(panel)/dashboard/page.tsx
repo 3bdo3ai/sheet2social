@@ -46,12 +46,6 @@ export default function DashboardPage() {
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [session, setSession] = useState<LicenseSessionView | null>(null);
   const [loading, setLoading] = useState(true);
-  const [botStatus, setBotStatus] = useState("Idle");
-  const [isStartingBot, setIsStartingBot] = useState(false);
-  const [botEmail, setBotEmail] = useState("");
-  const [botPassword, setBotPassword] = useState("");
-  const [botTwoFactorSecret, setBotTwoFactorSecret] = useState("");
-  const [botLogs, setBotLogs] = useState<string[]>([]);
 
   async function loadData() {
     const [statsRes, logsRes, sessionRes] = await Promise.all([
@@ -80,48 +74,6 @@ export default function DashboardPage() {
     const timer = setInterval(loadData, 4000);
     return () => clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    if (!window.api?.onBotLog) {
-      return;
-    }
-
-    const unsubscribe = window.api.onBotLog((message) => {
-      const stamped = `${new Date().toLocaleTimeString()} | ${message}`;
-      setBotLogs((previous) => [stamped, ...previous].slice(0, 40));
-    });
-
-    return unsubscribe;
-  }, []);
-
-  async function handleStartBot() {
-    if (!window.api?.startFacebookBot) {
-      setBotStatus("Electron API bridge is unavailable. Open this page through the desktop app.");
-      return;
-    }
-
-    if (!botEmail.trim() || !botPassword) {
-      setBotStatus("Email and password are required.");
-      return;
-    }
-
-    try {
-      setIsStartingBot(true);
-      setBotStatus("Starting Facebook bot...");
-      setBotLogs([]);
-      const status = await window.api.startFacebookBot({
-        email: botEmail.trim(),
-        password: botPassword,
-        twoFactorSecret: botTwoFactorSecret.trim() || undefined,
-      });
-      setBotStatus(status);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setBotStatus(`Failed: ${message}`);
-    } finally {
-      setIsStartingBot(false);
-    }
-  }
 
   const errorCount = logs.filter((entry) => entry.level === "error").length;
   const successCount = logs.filter((entry) => entry.level === "success").length;
@@ -158,7 +110,6 @@ export default function DashboardPage() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="app-title">Automation Command Center</h1>
-            <p className="app-subtitle">Core visibility for posting capacity, runtime health, and queue readiness</p>
           </div>
           <div className="space-y-2 text-right text-xs text-[#a4bee1]">
             <p>Last event: {lastEvent}</p>
@@ -204,53 +155,6 @@ export default function DashboardPage() {
               <Action href="/groups" label="Add Group" />
               <Action href="/accounts" label="Add Account" />
               <Action href="/automation" label="Open Automation" primary />
-            </div>
-            <div className="mt-4 rounded-xl border border-[var(--border)] bg-[#10223f] p-3">
-              <div className="grid gap-2 md:grid-cols-3">
-                <input
-                  value={botEmail}
-                  onChange={(event) => setBotEmail(event.target.value)}
-                  placeholder="Facebook email or phone"
-                  autoComplete="username"
-                  className="modal-input"
-                />
-                <input
-                  type="password"
-                  value={botPassword}
-                  onChange={(event) => setBotPassword(event.target.value)}
-                  placeholder="Facebook password"
-                  autoComplete="current-password"
-                  className="modal-input"
-                />
-                <input
-                  value={botTwoFactorSecret}
-                  onChange={(event) => setBotTwoFactorSecret(event.target.value)}
-                  placeholder="2FA code or Base32 secret"
-                  className="modal-input"
-                />
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleStartBot}
-                  disabled={isStartingBot}
-                  className="luxury-btn disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  {isStartingBot ? "Starting..." : "Start Bot"}
-                </button>
-                <p className="text-sm text-[#d0e2fa]">{botStatus}</p>
-              </div>
-              <div className="mt-3 max-h-44 overflow-auto rounded-lg border border-[var(--border)] bg-[#0d1d36] p-2">
-                {botLogs.length === 0 ? (
-                  <p className="text-xs text-[#95b0d7]">Live bot logs will appear here.</p>
-                ) : (
-                  botLogs.map((line, index) => (
-                    <p key={`${index}-${line}`} className="font-mono text-xs text-[#bdd3f1]">
-                      {line}
-                    </p>
-                  ))
-                )}
-              </div>
             </div>
           </div>
 

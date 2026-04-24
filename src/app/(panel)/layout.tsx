@@ -13,7 +13,6 @@ export default function PanelLayout({ children }: { children: ReactNode }) {
       <header className="luxury-panel mx-3 mb-4 mt-3 flex items-center justify-between rounded-2xl px-4 py-3 sm:mx-4 sm:mt-4 md:mx-6 md:mt-6 xl:hidden">
         <div>
           <p className="text-lg font-semibold tracking-tight">Sheet2Social</p>
-          <p className="text-xs text-[#9ecbff]">Automation Control Center</p>
         </div>
         <button
           type="button"
@@ -45,7 +44,6 @@ export default function PanelLayout({ children }: { children: ReactNode }) {
           <div className="mb-5 flex items-start justify-between border-b border-[var(--border)] pb-4">
             <div>
               <p className="text-xl font-semibold tracking-tight">Sheet2Social</p>
-              <p className="mt-1 text-xs text-[#9ecbff]">Automation Control Center</p>
             </div>
             <button
               type="button"

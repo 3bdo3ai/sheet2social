@@ -150,7 +150,7 @@ const SESSION_STORE_PATH = path.join(STORAGE_DIR, "facebook_sessions.json");
 const WORKER_LOCK_PATH = path.join(STORAGE_DIR, "worker.lock");
 const IS_DRY_RUN = process.env.WORKER_DRY_RUN === "true";
 const IS_VISIBLE_BROWSER = process.env.WORKER_VISIBLE_BROWSER === "true";
-const ENABLE_VISUAL_TRACE = process.env.WORKER_VISUAL_TRACE !== "false";
+const ENABLE_VISUAL_TRACE = false;
 const SKIP_PREFLIGHT_IN_VISIBLE_MODE =
   IS_VISIBLE_BROWSER && process.env.WORKER_SKIP_PREFLIGHT_IN_VISIBLE_MODE !== "false";
 const DEBUG_BROWSER_HOLD_MS = Math.max(
@@ -860,28 +860,9 @@ async function cleanupTraceScreenshots(): Promise<void> {
 }
 
 async function captureScreenshot(driver: WebDriver, label: string): Promise<string | undefined> {
-  if (!ENABLE_VISUAL_TRACE) {
-    return undefined;
-  }
-
-  try {
-    await fs.mkdir(SCREENSHOT_OUTPUT_DIR, { recursive: true });
-    const screenshot = await driver.takeScreenshot();
-    const fileName = `${Date.now()}-${sanitizeTraceLabel(label)}.png`;
-    const filePath = path.join(SCREENSHOT_OUTPUT_DIR, fileName);
-    await fs.writeFile(filePath, screenshot, "base64");
-
-    // Keep trace storage bounded so long runs do not grow without limit.
-    void cleanupTraceScreenshots();
-
-    if (isUserDataRuntime()) {
-      return filePath;
-    }
-
-    return `${SCREENSHOT_REFERENCE_PREFIX}/${fileName}`;
-  } catch {
-    return undefined;
-  }
+  void driver;
+  void label;
+  return undefined;
 }
 
 async function appendVisualTraceLog(

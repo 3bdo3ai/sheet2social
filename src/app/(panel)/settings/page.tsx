@@ -96,7 +96,6 @@ export default function SettingsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="app-title">Settings</h1>
-          <p className="app-subtitle">Configure automation behavior</p>
         </div>
         <button form="settings-form" type="submit" className="luxury-btn rounded-xl px-5 py-3 font-semibold">
           {saving ? "Saving..." : "Save Settings"}

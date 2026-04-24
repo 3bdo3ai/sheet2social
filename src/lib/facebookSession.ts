@@ -232,6 +232,15 @@ async function saveStoredSessionCookies(
   await writeSessionStore(store);
 }
 
+export async function saveImportedSessionCookies(
+  accountId: string,
+  cookies: IWebDriverOptionsCookie[]
+): Promise<FacebookSessionStatus> {
+  const normalized = cookies.filter(isWebDriverCookie);
+  await saveStoredSessionCookies(accountId, normalized);
+  return classifyStoredSessionCookies(normalized);
+}
+
 function isWebDriverCookie(value: unknown): value is IWebDriverOptionsCookie {
   if (!value || typeof value !== "object") {
     return false;

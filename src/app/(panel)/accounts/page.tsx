@@ -79,6 +79,8 @@ export default function AccountsPage() {
   const [sessionFilter, setSessionFilter] = useState<"all" | "logged-in" | "logged-out">("all");
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
+  const [cookieLoginOpen, setCookieLoginOpen] = useState(false);
+  const [cookieLoginLoading, setCookieLoginLoading] = useState(false);
   const [showAccountPassword, setShowAccountPassword] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [cookieText, setCookieText] = useState("");
@@ -88,6 +90,21 @@ export default function AccountsPage() {
   const [manualLoginState, setManualLoginState] = useState<ManualLoginState | null>(null);
   const [manualLoginChecking, setManualLoginChecking] = useState(false);
   const [loginActivityState, setLoginActivityState] = useState<Record<string, LoginActivityState>>({});
+
+  function normalizeCookiePayload(raw: unknown): unknown[] {
+    if (Array.isArray(raw)) {
+      return raw;
+    }
+
+    if (raw && typeof raw === "object") {
+      const value = raw as Record<string, unknown>;
+      if (Array.isArray(value.cookies)) {
+        return value.cookies;
+      }
+    }
+
+    return [];
+  }
 
   async function readResponseMessage(response: Response): Promise<string | undefined> {
     const text = await response.text();
@@ -673,6 +690,85 @@ export default function AccountsPage() {
     await loadItems();
   }
 
+  async function loginWithCookies(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (cookieLoginLoading) {
+      return;
+    }
+
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "").trim();
+    const alias = String(form.get("alias") ?? "").trim();
+    const proxyId = String(form.get("proxyId") ?? "").trim();
+    const cookieFile = form.get("cookieFile");
+    const cookiesJson = String(form.get("cookiesJson") ?? "").trim();
+
+    if (!name) {
+      alert("Account name is required.");
+      return;
+    }
+
+    let rawText = cookiesJson;
+    if (cookieFile instanceof File && cookieFile.size > 0) {
+      rawText = await cookieFile.text();
+    }
+
+    if (!rawText.trim()) {
+      alert("Provide cookies JSON by upload or paste.");
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      alert("Invalid JSON format in cookies input.");
+      return;
+    }
+
+    const cookies = normalizeCookiePayload(parsed);
+    if (cookies.length === 0) {
+      alert("No cookies found. Use either a cookies array or { cookies: [...] } format.");
+      return;
+    }
+
+    setCookieLoginLoading(true);
+    try {
+      const response = await safeFetch("/api/admin/accounts/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "cookie-login",
+          name,
+          alias: alias || undefined,
+          proxyId: proxyId || undefined,
+          cookies,
+        }),
+      });
+
+      if (!response.ok) {
+        const message = await readResponseMessage(response);
+        alert(message || "Cookie login failed");
+        return;
+      }
+
+      const result = (await response.json()) as {
+        accountId?: string;
+        message?: string;
+      };
+
+      setCookieLoginOpen(false);
+      await loadItems();
+      alert(result.message || "Cookie login imported successfully.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Cookie login failed";
+      alert(message);
+    } finally {
+      setCookieLoginLoading(false);
+    }
+  }
+
   function downloadTemplate() {
     const content = [
       "name,alias,username,password,two_factor_secret,socks5_proxy_host,socks5_proxy_port,socks5_proxy_username,socks5_proxy_password,post_filter,posting_method,is_active",
@@ -727,6 +823,9 @@ export default function AccountsPage() {
           </button>
           <button onClick={() => setBulkOpen(true)} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">
             Upload CSV
+          </button>
+          <button onClick={() => setCookieLoginOpen(true)} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">
+            Login with Cookies
           </button>
           <button onClick={() => setOpen(true)} className="luxury-btn inline-flex items-center gap-2 rounded-xl px-5 py-3 font-semibold">
             <PlusIcon className="h-4 w-4" />
@@ -1078,6 +1177,56 @@ export default function AccountsPage() {
             <div className="mt-2 flex justify-end gap-2">
               <button type="button" onClick={() => setBulkOpen(false)} className="btn-subtle">Cancel</button>
               <button type="submit" className="luxury-btn rounded-lg px-4 py-2 font-semibold">Import CSV</button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
+
+      {cookieLoginOpen ? (
+        <Modal title="Login with Cookies" onClose={() => setCookieLoginOpen(false)}>
+          <form onSubmit={loginWithCookies} className="grid gap-3">
+            <input name="name" required placeholder="Account name" className="modal-input" />
+            <input name="alias" placeholder="Alias (optional)" className="modal-input" />
+
+            <label className="grid gap-1 text-sm">
+              <span className="app-label">Saved Proxy (optional)</span>
+              <select name="proxyId" className="modal-input" defaultValue="">
+                <option value="">No saved proxy</option>
+                {proxies.map((proxy) => (
+                  <option key={proxy.id} value={proxy.id}>
+                    {proxy.ipAddress}:{proxy.port} {proxy.username ? `(${proxy.username})` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="grid gap-1 text-sm">
+              <span className="app-label">Cookie JSON File (optional)</span>
+              <input name="cookieFile" type="file" accept="application/json,.json,text/plain" className="modal-input" />
+            </label>
+
+            <label className="grid gap-1 text-sm">
+              <span className="app-label">Or Paste Cookies JSON</span>
+              <textarea
+                name="cookiesJson"
+                placeholder='Paste cookies array or {"cookies": [...]} JSON'
+                className="modal-input min-h-40 font-mono text-xs"
+              />
+            </label>
+
+            <p className="text-xs text-[#9fb4d5]">
+              Required Facebook auth cookies: c_user and xs. The imported account will be available in automation like any other account profile.
+            </p>
+
+            <div className="mt-2 flex justify-end gap-2">
+              <button type="button" onClick={() => setCookieLoginOpen(false)} className="btn-subtle">Cancel</button>
+              <button
+                type="submit"
+                disabled={cookieLoginLoading}
+                className="luxury-btn rounded-lg px-4 py-2 font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {cookieLoginLoading ? "Importing..." : "Login with Cookies"}
+              </button>
             </div>
           </form>
         </Modal>

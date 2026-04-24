@@ -587,13 +587,7 @@ export default function AutomationPage() {
     <section className="space-y-5 animate-reveal-up">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="app-title">Automation Flow Inspector</h1>
-          <p className="app-subtitle">
-            Visual trace of each automation stage with login screenshots so you can see exactly where it fails
-          </p>
-          <p className="mt-1 text-xs text-[#93b3da]">
-            Tip: set WORKER_VISIBLE_BROWSER=true before starting worker to open live Chrome windows during debugging.
-          </p>
+          <h1 className="app-title">Automation</h1>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -638,60 +632,6 @@ export default function AutomationPage() {
           Data loading warning: {requestError}
         </div>
       ) : null}
-
-      {runtimeSettings ? (
-        <div className="app-card p-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#9ec4ef]">Session Runtime Config</p>
-          <p className="mt-2 text-sm text-[#d4e6ff]">
-            Worker will publish up to <span className="font-semibold">{runtimeSettings.postsPerSession}</span> post(s)
-            per session, then cool down for <span className="font-semibold">{runtimeSettings.waitIntervalMinutes}</span>{" "}
-            minute(s) before resuming automatically.
-          </p>
-          <p className="mt-2 text-xs text-[#9eb8dc]">
-            Parallel accounts: {runtimeSettings.parallelAccounts} | Max posts per account each cycle: {runtimeSettings.maxPostsPerAccountPerCycle}
-          </p>
-        </div>
-      ) : null}
-
-      <div className="app-card p-3">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm font-semibold uppercase tracking-[0.15em] text-[#a6c8f0]">FLOW STAGES</p>
-          <span className={`status-chip ${staleWhileRunning ? "status-stopped" : "status-running"}`}>
-            {latestLogEntry
-              ? `Last event ${formatRelativeTime(latestLogEntry.createdAt)}`
-              : "No events yet"}
-          </span>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {stageSnapshots.map((stage, index) => (
-            <div
-              key={stage.id}
-              className={`rounded-xl border p-3 text-sm ${stageToneClass(stage.status)}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-semibold text-[#eaf4ff]">
-                  {index + 1}. {stage.title}
-                </p>
-                <span className={`rounded-full border px-2 py-0.5 text-[11px] ${stageBadgeClass(stage.status)}`}>
-                  {stage.status.toUpperCase()}
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-[#a7c0e1]">{stage.description}</p>
-              <p className="mt-3 text-xs text-[#d8e8ff]">
-                {stage.lastEvent ? trimMessage(stage.lastEvent.message) : "Waiting for stage activity..."}
-              </p>
-              <p className="mt-1 text-[11px] text-[#90a9cc]">
-                {stage.lastEvent
-                  ? `${new Date(stage.lastEvent.createdAt).toLocaleTimeString()} (${formatRelativeTime(
-                      stage.lastEvent.createdAt
-                    )})`
-                  : "No updates"}
-              </p>
-            </div>
-          ))}
-        </div>
-      </div>
 
       <div className="app-card p-3">
         <div className="mb-3 grid gap-3 md:grid-cols-4">
@@ -749,65 +689,6 @@ export default function AutomationPage() {
           ) : null}
         </div>
 
-        <div className="mb-3 grid gap-3 xl:grid-cols-[1.35fr_1fr]">
-          <div className="rounded-xl border border-[var(--border)] bg-[#0f1f3a] p-3 text-sm">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#9ec4ef]">Failure Spotlight</p>
-            {latestError ? (
-              <>
-                <p className="mt-2 text-sm font-semibold text-[#ffd4de]">{latestError.message}</p>
-                <p className="mt-1 text-xs text-[#ffc7d3]">{inferIssueHint(latestError.message)}</p>
-                <p className="mt-2 text-xs text-[#a9c2e6]">
-                  Seen {formatRelativeTime(latestError.createdAt)} | {new Date(latestError.createdAt).toLocaleString()}
-                </p>
-                {latestErrorScreenshot ? (
-                  <a href={latestErrorScreenshot} target="_blank" rel="noreferrer" className="mt-2 block">
-                    <img
-                      src={`${latestErrorScreenshot}?t=${encodeURIComponent(latestError.createdAt)}`}
-                      alt="Latest error screenshot"
-                      className="w-full rounded-lg border border-[var(--border)] bg-[#091326]"
-                      loading="lazy"
-                    />
-                  </a>
-                ) : null}
-                {latestErrorTextDetails ? (
-                  <details className="mt-2 rounded-lg border border-[var(--border)] bg-[#0a1528] p-2">
-                    <summary className="cursor-pointer text-xs text-[#9ec4ef]">Show error details</summary>
-                    <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap text-xs leading-6 text-[#cde3ff]">
-                      {latestErrorTextDetails}
-                    </pre>
-                  </details>
-                ) : null}
-              </>
-            ) : (
-              <p className="mt-2 text-sm text-[#a9c2e6]">No error captured in the current log window.</p>
-            )}
-          </div>
-
-          <div className="rounded-xl border border-[var(--border)] bg-[#0f1f3a] p-3 text-sm">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#9ec4ef]">Current Run Snapshot</p>
-            <div className="mt-2 space-y-2">
-              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
-                <p className="text-[#a9c2e6]">Run info logs</p>
-                <p className="font-semibold">{runInfoCount}</p>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
-                <p className="text-[#a9c2e6]">Run success logs</p>
-                <p className="font-semibold">{runSuccessCount}</p>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
-                <p className="text-[#a9c2e6]">Filtered events</p>
-                <p className="font-semibold">{logs.length}</p>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[#10223f] px-2.5 py-2">
-                <p className="text-[#a9c2e6]">Feed status</p>
-                <span className={`status-chip ${staleWhileRunning ? "status-stopped" : "status-running"}`}>
-                  {staleWhileRunning ? "Stale" : "Healthy"}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <select
             value={levelFilter}
@@ -844,55 +725,6 @@ export default function AutomationPage() {
           <button onClick={clearLogs} className="btn-subtle text-xs text-[#ffc2cc]">
             Clear Logs
           </button>
-        </div>
-
-        <p className="mb-2 text-sm font-semibold text-[#b3c9ea]">TRACE TIMELINE</p>
-        <div className="mb-4 max-h-[35vh] space-y-2 overflow-auto rounded-xl border border-[var(--border)] bg-[#0a1528] p-3">
-          {logs.length === 0 ? (
-            <p className="text-sm text-[#9eb8dc]">No events match current filters.</p>
-          ) : (
-            logs.slice(-80).map((entry) => {
-              const screenshotUrl = extractScreenshotUrl(entry.details);
-              const detailsText = stripScreenshotReference(entry.details);
-
-              return (
-                <div key={entry.id} className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
-                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                    <span className={`rounded-full border px-2 py-0.5 font-semibold ${logLevelClass(entry.level)}`}>
-                      {entry.level.toUpperCase()}
-                    </span>
-                    <span className="rounded-full border border-[#426698] bg-[#142a49] px-2 py-0.5 text-[#cae2ff]">
-                      {classifyLogStage(entry.message).toUpperCase()}
-                    </span>
-                    <span className="text-[#8ea7cb]">
-                      {new Date(entry.createdAt).toLocaleTimeString()} ({formatRelativeTime(entry.createdAt)})
-                    </span>
-                  </div>
-                  <p className="mt-1 text-sm text-[#d7e7ff]">{entry.message}</p>
-
-                  {screenshotUrl ? (
-                    <a href={screenshotUrl} target="_blank" rel="noreferrer" className="mt-2 block">
-                      <img
-                        src={`${screenshotUrl}?t=${encodeURIComponent(entry.createdAt)}`}
-                        alt="Automation flow screenshot"
-                        className="w-full rounded-lg border border-[var(--border)] bg-[#091326]"
-                        loading="lazy"
-                      />
-                    </a>
-                  ) : null}
-
-                  {detailsText ? (
-                    <details className="mt-2 rounded border border-[var(--border)] bg-[#091326] p-2">
-                      <summary className="cursor-pointer text-xs text-[#9ec4ef]">Show details</summary>
-                      <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap text-xs leading-6 text-[#cde3ff]">
-                        {detailsText}
-                      </pre>
-                    </details>
-                  ) : null}
-                </div>
-              );
-            })
-          )}
         </div>
 
         <p className="mb-2 text-sm font-semibold text-[#b3c9ea]">RAW TERMINAL VIEW</p>

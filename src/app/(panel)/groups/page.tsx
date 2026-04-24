@@ -201,7 +201,6 @@ export default function GroupsPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="app-title">Groups Management</h1>
-          <p className="app-subtitle">Manage your Facebook groups</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={downloadTemplate} className="btn-subtle rounded-xl px-4 py-3 text-sm font-semibold">

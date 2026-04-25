@@ -34,9 +34,9 @@ export async function POST(request: Request) {
   const ipAddress = payload.ipAddress?.trim();
   const port = Number(payload.port);
 
-  if (!ipAddress || !port) {
+  if (!ipAddress || !Number.isFinite(port) || port <= 0) {
     return NextResponse.json(
-      { error: "ipAddress and port are required" },
+      { error: "Valid ipAddress and port are required" },
       { status: 400 }
     );
   }

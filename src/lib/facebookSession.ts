@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
+import { createConnection, type Socket } from "node:net";
 
 import { Builder, By, Key, until } from "selenium-webdriver";
 import type { IWebDriverOptionsCookie, WebDriver } from "selenium-webdriver";
@@ -40,6 +42,11 @@ type ProxyConfig = {
   port: number;
   username?: string;
   password?: string;
+};
+type ProxyProtocol = "socks5" | "http";
+type LocalProxyBridge = {
+  localProxyUrl: string;
+  close: () => Promise<void>;
 };
 
 type SessionStore = Record<string, IWebDriverOptionsCookie[]>;
@@ -125,6 +132,7 @@ const FACEBOOK_LOGIN_WAIT_MS = 60_000;
 const MANUAL_LOGIN_SESSION_TTL_MS = 10 * 60_000;
 const MANUAL_TWO_FACTOR_WAIT_MS = 120_000;
 const PROXY_IP_DETECTION_WAIT_MS = 15_000;
+const PROXY_TUNNEL_TIMEOUT_MS = 25_000;
 const TWO_FACTOR_FIELD_WAIT_MS = 20_000;
 
 const TWO_FACTOR_INPUT_SELECTORS = [
@@ -279,7 +287,10 @@ async function readProxyConfig(account: FbAccountRecord): Promise<ProxyConfig | 
   return undefined;
 }
 
-async function createProxyAuthExtension(proxyConfig: ProxyConfig): Promise<string> {
+async function createProxyAuthExtension(
+  proxyConfig: ProxyConfig,
+  proxyProtocol: ProxyProtocol
+): Promise<string> {
   const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "sheet2social-proxy-"));
   const manifest = {
     manifest_version: 3,
@@ -301,7 +312,7 @@ chrome.proxy.settings.set({
     mode: "fixed_servers",
     rules: {
       singleProxy: {
-        scheme: "http",
+        scheme: ${JSON.stringify(proxyProtocol)},
         host: ${JSON.stringify(proxyConfig.host)},
         port: parseInt(${proxyConfig.port})
       }
@@ -398,6 +409,377 @@ async function detectActivePublicIp(driver: WebDriver): Promise<string | undefin
   }
 
   return undefined;
+}
+
+async function detectMachinePublicIp(): Promise<string | undefined> {
+  for (const endpoint of PUBLIC_IP_CHECK_ENDPOINTS) {
+    try {
+      const response = await fetch(endpoint, { cache: "no-store" });
+      if (!response.ok) {
+        continue;
+      }
+
+      const text = await response.text();
+      const parsed = extractIpFromText(text);
+      if (parsed) {
+        return parsed;
+      }
+    } catch {
+      // Try next endpoint.
+    }
+  }
+
+  return undefined;
+}
+
+function waitForSocketData(
+  socket: Socket,
+  isComplete: (buffer: Buffer) => number | null,
+  timeoutMs: number,
+  contextLabel: string
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${contextLabel} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const usedLength = isComplete(buffer);
+      if (usedLength === null) {
+        return;
+      }
+
+      cleanup();
+
+      if (usedLength < buffer.length) {
+        socket.unshift(buffer.subarray(usedLength));
+      }
+
+      resolve(buffer.subarray(0, usedLength));
+    };
+
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const onClose = () => {
+      cleanup();
+      reject(new Error(`${contextLabel} socket closed before data was fully received.`));
+    };
+
+    socket.on("data", onData);
+    socket.on("error", onError);
+    socket.on("close", onClose);
+  });
+}
+
+function openSocketConnection(host: string, port: number, timeoutMs: number): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host, port });
+    socket.on("error", () => undefined);
+
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`Connection to ${host}:${port} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+
+    const onError = (error: Error) => {
+      clearTimeout(timer);
+      socket.off("connect", onConnect);
+      reject(error);
+    };
+
+    const onConnect = () => {
+      clearTimeout(timer);
+      socket.off("error", onError);
+      socket.setNoDelay(true);
+      resolve(socket);
+    };
+
+    socket.once("error", onError);
+    socket.once("connect", onConnect);
+  });
+}
+
+async function openSocksTunnel(
+  proxyConfig: ProxyConfig,
+  targetHost: string,
+  targetPort: number
+): Promise<Socket> {
+  const socket = await openSocketConnection(proxyConfig.host, proxyConfig.port, PROXY_TUNNEL_TIMEOUT_MS);
+
+  try {
+    const methods = proxyConfig.username && proxyConfig.password ? [0x00, 0x02] : [0x00];
+    socket.write(Buffer.from([0x05, methods.length, ...methods]));
+
+    const greeting = await waitForSocketData(
+      socket,
+      (buffer) => (buffer.length >= 2 ? 2 : null),
+      PROXY_TUNNEL_TIMEOUT_MS,
+      "SOCKS5 greeting"
+    );
+
+    if (greeting[0] !== 0x05) {
+      throw new Error("SOCKS proxy returned an unsupported protocol version.");
+    }
+
+    const method = greeting[1];
+    if (method === 0xff) {
+      throw new Error("SOCKS proxy rejected all authentication methods.");
+    }
+
+    if (method === 0x02) {
+      if (!proxyConfig.username || !proxyConfig.password) {
+        throw new Error("SOCKS proxy requires username/password, but credentials are missing.");
+      }
+
+      const usernameBuffer = Buffer.from(proxyConfig.username, "utf8");
+      const passwordBuffer = Buffer.from(proxyConfig.password, "utf8");
+
+      if (usernameBuffer.length > 255 || passwordBuffer.length > 255) {
+        throw new Error("SOCKS proxy credentials exceed supported length limits.");
+      }
+
+      const authPayload = Buffer.concat([
+        Buffer.from([0x01, usernameBuffer.length]),
+        usernameBuffer,
+        Buffer.from([passwordBuffer.length]),
+        passwordBuffer,
+      ]);
+
+      socket.write(authPayload);
+
+      const authResponse = await waitForSocketData(
+        socket,
+        (buffer) => (buffer.length >= 2 ? 2 : null),
+        PROXY_TUNNEL_TIMEOUT_MS,
+        "SOCKS5 auth"
+      );
+
+      if (authResponse[1] !== 0x00) {
+        throw new Error("SOCKS proxy authentication failed for the configured credentials.");
+      }
+    }
+
+    const targetHostBuffer = Buffer.from(targetHost, "utf8");
+    if (targetHostBuffer.length === 0 || targetHostBuffer.length > 255) {
+      throw new Error(`Invalid SOCKS tunnel target host: ${targetHost}`);
+    }
+
+    const connectRequest = Buffer.concat([
+      Buffer.from([0x05, 0x01, 0x00, 0x03, targetHostBuffer.length]),
+      targetHostBuffer,
+      Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff]),
+    ]);
+
+    socket.write(connectRequest);
+
+    const connectResponse = await waitForSocketData(
+      socket,
+      (buffer) => {
+        if (buffer.length < 5) {
+          return null;
+        }
+
+        const atyp = buffer[3];
+        let responseLength = 0;
+
+        if (atyp === 0x01) {
+          responseLength = 10;
+        } else if (atyp === 0x04) {
+          responseLength = 22;
+        } else if (atyp === 0x03) {
+          responseLength = 7 + buffer[4];
+        } else {
+          return null;
+        }
+
+        return buffer.length >= responseLength ? responseLength : null;
+      },
+      PROXY_TUNNEL_TIMEOUT_MS,
+      "SOCKS5 connect"
+    );
+
+    if (connectResponse[1] !== 0x00) {
+      throw new Error(`SOCKS proxy failed to connect to ${targetHost}:${targetPort} (reply code ${connectResponse[1]}).`);
+    }
+
+    return socket;
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
+}
+
+async function openHttpProxyTunnel(
+  proxyConfig: ProxyConfig,
+  targetHost: string,
+  targetPort: number
+): Promise<Socket> {
+  const socket = await openSocketConnection(proxyConfig.host, proxyConfig.port, PROXY_TUNNEL_TIMEOUT_MS);
+
+  try {
+    const proxyAuthHeader =
+      proxyConfig.username && proxyConfig.password
+        ? `Proxy-Authorization: Basic ${Buffer.from(`${proxyConfig.username}:${proxyConfig.password}`).toString("base64")}\r\n`
+        : "";
+
+    const requestPayload =
+      `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
+      `Host: ${targetHost}:${targetPort}\r\n` +
+      "Proxy-Connection: Keep-Alive\r\n" +
+      proxyAuthHeader +
+      "\r\n";
+
+    socket.write(requestPayload);
+
+    const responseHeader = await waitForSocketData(
+      socket,
+      (buffer) => {
+        const headerEndIndex = buffer.indexOf("\r\n\r\n");
+        return headerEndIndex >= 0 ? headerEndIndex + 4 : null;
+      },
+      PROXY_TUNNEL_TIMEOUT_MS,
+      "HTTP proxy CONNECT"
+    );
+
+    const statusLine = responseHeader.toString("utf8").split("\r\n")[0] ?? "";
+    if (!/^HTTP\/1\.[01] 200\b/i.test(statusLine)) {
+      throw new Error(`HTTP proxy CONNECT failed: ${statusLine || "Unknown status"}`);
+    }
+
+    return socket;
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
+}
+
+async function createAuthenticatedProxyBridge(
+  proxyConfig: ProxyConfig,
+  proxyProtocol: ProxyProtocol
+): Promise<LocalProxyBridge> {
+  const server = createHttpServer((_, response) => {
+    response.writeHead(501, { "Content-Type": "text/plain" });
+    response.end("Proxy bridge only supports CONNECT requests.");
+  });
+
+  server.on("connect", (request, clientSocket, head) => {
+    clientSocket.on("error", () => undefined);
+
+    void (async () => {
+      const target = String(request.url ?? "").trim();
+      const separatorIndex = target.lastIndexOf(":");
+
+      if (separatorIndex <= 0) {
+        clientSocket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+        clientSocket.destroy();
+        return;
+      }
+
+      const targetHost = target.slice(0, separatorIndex);
+      const targetPort = Number(target.slice(separatorIndex + 1));
+
+      if (!targetHost || !Number.isFinite(targetPort) || targetPort <= 0) {
+        clientSocket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+        clientSocket.destroy();
+        return;
+      }
+
+      let upstreamSocket: Socket | undefined;
+      try {
+        let lastTunnelError: unknown;
+
+        for (let attemptNumber = 1; attemptNumber <= 2; attemptNumber += 1) {
+          try {
+            upstreamSocket =
+              proxyProtocol === "socks5"
+                ? await openSocksTunnel(proxyConfig, targetHost, targetPort)
+                : await openHttpProxyTunnel(proxyConfig, targetHost, targetPort);
+            break;
+          } catch (error) {
+            lastTunnelError = error;
+          }
+        }
+
+        if (!upstreamSocket) {
+          throw lastTunnelError instanceof Error
+            ? lastTunnelError
+            : new Error(`Unable to open upstream proxy tunnel to ${targetHost}:${targetPort}.`);
+        }
+
+        clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+
+        if (head.length > 0) {
+          upstreamSocket.write(head);
+        }
+
+        upstreamSocket.on("error", () => {
+          clientSocket.destroy();
+        });
+
+        clientSocket.on("error", () => {
+          upstreamSocket?.destroy();
+        });
+
+        upstreamSocket.pipe(clientSocket);
+        clientSocket.pipe(upstreamSocket);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[ProxyBridge] Failed to open CONNECT tunnel for ${targetHost}:${targetPort}: ${reason}`
+        );
+        clientSocket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+        clientSocket.destroy();
+        upstreamSocket?.destroy();
+      }
+    })();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(0, "127.0.0.1");
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+    throw new Error("Failed to determine local proxy bridge address.");
+  }
+
+  return {
+    localProxyUrl: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    },
+  };
 }
 
 async function hasAuthenticatedSession(driver: WebDriver): Promise<boolean> {
@@ -1126,120 +1508,143 @@ async function initializeBrowser(
   sessionCookies: IWebDriverOptionsCookie[],
   initOptions?: { forceHeaded?: boolean }
 ): Promise<BrowserInitializationResult> {
-  const driverOptions = new chrome.Options();
-  let proxyExtensionDir: string | undefined;
+  const proxyProtocols: Array<ProxyProtocol | undefined> = proxyConfig
+    ? ["socks5", "http"]
+    : [undefined];
 
-  driverOptions.addArguments(
-    "--disable-gpu",
-    "--window-size=390,844",
-    `--user-agent=${MOBILE_FACEBOOK_USER_AGENT}`,
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process"
-  );
-  driverOptions.excludeSwitches("enable-automation");
+  const machinePublicIp = proxyConfig ? await detectMachinePublicIp() : undefined;
+  let lastError: unknown;
 
-  if (!initOptions?.forceHeaded && shouldRunHeadless()) {
-    driverOptions.addArguments("--headless=new");
-  }
+  for (const proxyProtocol of proxyProtocols) {
+    const driverOptions = new chrome.Options();
+    let authProxyBridge: LocalProxyBridge | undefined;
 
-  if (proxyConfig) {
-    if (proxyConfig.username && proxyConfig.password) {
-      proxyExtensionDir = await createProxyAuthExtension(proxyConfig);
-      driverOptions.addArguments(`--disable-extensions-except=${proxyExtensionDir}`);
-      driverOptions.addArguments(`--load-extension=${proxyExtensionDir}`);
-    } else {
-      driverOptions.addArguments(`--proxy-server=http://${proxyConfig.host}:${proxyConfig.port}`);
-    }
-  }
+    driverOptions.addArguments(
+      "--disable-gpu",
+      "--window-size=390,844",
+      `--user-agent=${MOBILE_FACEBOOK_USER_AGENT}`,
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process"
+    );
+    driverOptions.excludeSwitches("enable-automation");
 
-  const chromeBinaryPath = await resolveChromeBinaryPath();
-  if (chromeBinaryPath) {
-    driverOptions.setChromeBinaryPath(chromeBinaryPath);
-  }
-
-  await ensureStorageDir();
-
-  // Resolve chromedriver explicitly to avoid selenium-manager path virtualisation
-  // in Next.js server routes (\ ROOT\ ... error).
-  const chromedriverPath = resolveChromedriverPath();
-  const service = chromedriverPath
-    ? new chrome.ServiceBuilder(chromedriverPath)
-    : new chrome.ServiceBuilder();
-  service.enableVerboseLogging();
-  service.loggingTo(CHROMEDRIVER_LOG_PATH);
-
-  let driver: WebDriver;
-  try {
-    const builder = new Builder().forBrowser("chrome").setChromeOptions(driverOptions);
-    builder.setChromeService(service);
-    driver = await builder.build();
-  } catch (error) {
-    if (proxyExtensionDir) {
-      await fs.rm(proxyExtensionDir, { recursive: true, force: true }).catch(() => undefined);
+    if (!initOptions?.forceHeaded && shouldRunHeadless()) {
+      driverOptions.addArguments("--headless=new");
     }
 
-    const message = normalizeBrowserStartupErrorMessage(error);
-    throw new Error(`Unable to start browser session: ${message} ChromeDriver log: ${CHROMEDRIVER_LOG_PATH}`);
-  }
-
-  let proxyPublicIp: string | undefined;
-
-  try {
-    if (proxyConfig) {
-      proxyPublicIp = await detectActivePublicIp(driver);
-      if (!proxyPublicIp) {
-        throw new Error(
-          `The proxy is configured (${proxyConfig.host}:${proxyConfig.port}) but its public IP could not be detected. Please verify proxy credentials and connectivity.`
-        );
+    if (proxyConfig && proxyProtocol) {
+      if (proxyConfig.username && proxyConfig.password) {
+        authProxyBridge = await createAuthenticatedProxyBridge(proxyConfig, proxyProtocol);
+        driverOptions.addArguments(`--proxy-server=${authProxyBridge.localProxyUrl}`);
+      } else {
+        driverOptions.addArguments(`--proxy-server=${proxyProtocol}://${proxyConfig.host}:${proxyConfig.port}`);
       }
     }
+
+    const chromeBinaryPath = await resolveChromeBinaryPath();
+    if (chromeBinaryPath) {
+      driverOptions.setChromeBinaryPath(chromeBinaryPath);
+    }
+
+    await ensureStorageDir();
+
+    const chromedriverPath = resolveChromedriverPath();
+    const service = chromedriverPath
+      ? new chrome.ServiceBuilder(chromedriverPath)
+      : new chrome.ServiceBuilder();
+    service.enableVerboseLogging();
+    service.loggingTo(CHROMEDRIVER_LOG_PATH);
+
+    let driver: WebDriver;
+    try {
+      const builder = new Builder().forBrowser("chrome").setChromeOptions(driverOptions);
+      builder.setChromeService(service);
+      driver = await builder.build();
+    } catch (error) {
+      await authProxyBridge?.close().catch(() => undefined);
+
+      const message = normalizeBrowserStartupErrorMessage(error);
+      throw new Error(`Unable to start browser session: ${message} ChromeDriver log: ${CHROMEDRIVER_LOG_PATH}`);
+    }
+
+    let proxyPublicIp: string | undefined;
 
     try {
-      await driver.get("https://m.facebook.com/");
+      if (proxyConfig) {
+        proxyPublicIp = await detectActivePublicIp(driver);
+
+        if (!proxyPublicIp) {
+          throw new Error(
+            `The proxy is configured (${proxyConfig.host}:${proxyConfig.port}) but its public IP could not be detected.`
+          );
+        }
+
+        if (machinePublicIp && proxyPublicIp === machinePublicIp) {
+          throw new Error(
+            `Proxy protocol ${proxyProtocol} resolved to machine IP (${proxyPublicIp}) instead of proxy output.`
+          );
+        }
+      }
+
+      try {
+        await driver.get("https://m.facebook.com/");
+      } catch (error) {
+        const errText = String(error);
+        if (errText.includes("ERR_SOCKS_CONNECTION_FAILED") || errText.includes("ERR_PROXY_CONNECTION_FAILED")) {
+          throw new Error(`The configured Proxy is unreachable or offline (${proxyConfig?.host}:${proxyConfig?.port}). Please fix or remove the proxy and try again.`);
+        }
+        if (errText.includes("ERR_CONNECTION_") || errText.includes("ERR_NAME_NOT_RESOLVED")) {
+          throw new Error("Could not connect to Facebook. This is likely due to your network or proxy settings.");
+        }
+        throw error;
+      }
+
+      if (sessionCookies.length > 0) {
+        for (const cookie of sessionCookies) {
+          try {
+            await driver.manage().addCookie(cookie);
+          } catch {
+            // Ignore invalid/expired cookie entries and continue.
+          }
+        }
+        await driver.navigate().refresh();
+      }
+
+      await driver.executeScript(
+        "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+      );
+
+      return {
+        driver,
+        proxyPublicIp,
+        cleanup: async () => {
+          await authProxyBridge?.close().catch(() => undefined);
+        },
+      };
     } catch (error) {
-      const errText = String(error);
-      if (errText.includes("ERR_SOCKS_CONNECTION_FAILED") || errText.includes("ERR_PROXY_CONNECTION_FAILED")) {
-        throw new Error(`The configured Proxy is unreachable or offline (${proxyConfig?.host}:${proxyConfig?.port}). Please fix or remove the proxy and try again.`);
-      }
-      if (errText.includes("ERR_CONNECTION_") || errText.includes("ERR_NAME_NOT_RESOLVED")) {
-        throw new Error("Could not connect to Facebook. This is likely due to your network or proxy settings.");
-      }
-      throw error;
-    }
+      lastError = error;
+      await driver.quit().catch(() => undefined);
+      await authProxyBridge?.close().catch(() => undefined);
 
-    if (sessionCookies.length > 0) {
-      for (const cookie of sessionCookies) {
-        try {
-          await driver.manage().addCookie(cookie);
-        } catch {
-          // Ignore invalid/expired cookie entries and continue.
-        }
+      const isLastAttempt = proxyProtocol === proxyProtocols[proxyProtocols.length - 1];
+      if (!proxyConfig || isLastAttempt) {
+        break;
       }
-      await driver.navigate().refresh();
     }
-
-    await driver.executeScript(
-      "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
-    );
-
-    return {
-      driver,
-      proxyPublicIp,
-      cleanup: async () => {
-        if (proxyExtensionDir) {
-          await fs.rm(proxyExtensionDir, { recursive: true, force: true }).catch(() => undefined);
-        }
-      },
-    };
-  } catch (error) {
-    await driver.quit().catch(() => undefined);
-    if (proxyExtensionDir) {
-      await fs.rm(proxyExtensionDir, { recursive: true, force: true }).catch(() => undefined);
-    }
-    throw error;
   }
+
+  if (lastError instanceof Error) {
+    const message =
+      lastError.message.includes("public IP could not be detected") ||
+      lastError.message.includes("resolved to machine IP")
+        ? `${lastError.message} Please verify credentials and protocol type (SOCKS5 vs HTTP).`
+        : lastError.message;
+    throw new Error(message);
+  }
+
+  throw new Error("Unable to initialize browser with the configured proxy.");
 }
 
 async function closeManualLoginSession(manualLoginId: string): Promise<void> {

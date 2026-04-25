@@ -156,10 +156,16 @@ export async function POST(request: Request) {
   const socks5ProxyPassword = payload.socks5ProxyPassword?.trim() || undefined;
   const autoLogin = payload.autoLogin !== false;
 
-  const hasManualProxyHost = Boolean(socks5ProxyHost);
-  const hasManualProxyPort = socks5ProxyPort !== undefined;
-  const hasManualProxyAuthUser = Boolean(socks5ProxyUsername);
-  const hasManualProxyAuthPassword = Boolean(socks5ProxyPassword);
+  const useSavedProxy = Boolean(proxyId);
+  const effectiveManualProxyHost = useSavedProxy ? undefined : socks5ProxyHost;
+  const effectiveManualProxyPort = useSavedProxy ? undefined : socks5ProxyPort;
+  const effectiveManualProxyUsername = useSavedProxy ? undefined : socks5ProxyUsername;
+  const effectiveManualProxyPassword = useSavedProxy ? undefined : socks5ProxyPassword;
+
+  const hasManualProxyHost = Boolean(effectiveManualProxyHost);
+  const hasManualProxyPort = effectiveManualProxyPort !== undefined;
+  const hasManualProxyAuthUser = Boolean(effectiveManualProxyUsername);
+  const hasManualProxyAuthPassword = Boolean(effectiveManualProxyPassword);
 
   if (!name || !username || !password) {
     return NextResponse.json(
@@ -182,30 +188,23 @@ export async function POST(request: Request) {
     );
   }
 
-  if (proxyId && (hasManualProxyHost || hasManualProxyPort || hasManualProxyAuthUser || hasManualProxyAuthPassword)) {
-    return NextResponse.json(
-      { error: "Choose one proxy mechanism: saved proxy OR manual proxy fields." },
-      { status: 400 }
-    );
-  }
-
   if (proxyId) {
     const proxies = await readParquetRecords("proxies");
-    const selectedProxy = proxies.find((proxy) => proxy.id === proxyId);
+    const selectedProxy = proxies.find((proxy) => proxy.id === proxyId && proxy.enabled !== false);
     if (!selectedProxy) {
       return NextResponse.json({ error: "Proxy not found" }, { status: 404 });
     }
   }
 
   let resolvedProxyId = proxyId || undefined;
-  if (!resolvedProxyId && socks5ProxyHost && socks5ProxyPort) {
+  if (!resolvedProxyId && effectiveManualProxyHost && effectiveManualProxyPort) {
     const nowProxy = new Date().toISOString();
     const proxyRecord: ProxyRecord = {
       id: randomUUID(),
-      ipAddress: socks5ProxyHost,
-      port: socks5ProxyPort,
-      username: socks5ProxyUsername,
-      password: socks5ProxyPassword,
+      ipAddress: effectiveManualProxyHost,
+      port: effectiveManualProxyPort,
+      username: effectiveManualProxyUsername,
+      password: effectiveManualProxyPassword,
       enabled: true,
       createdAt: nowProxy,
       updatedAt: nowProxy,
@@ -224,10 +223,10 @@ export async function POST(request: Request) {
     password,
     twoFactorSecret: twoFactorSecret || undefined,
     proxyId: resolvedProxyId,
-    socks5ProxyHost,
-    socks5ProxyPort,
-    socks5ProxyUsername,
-    socks5ProxyPassword,
+    socks5ProxyHost: effectiveManualProxyHost,
+    socks5ProxyPort: effectiveManualProxyPort,
+    socks5ProxyUsername: effectiveManualProxyUsername,
+    socks5ProxyPassword: effectiveManualProxyPassword,
     postFilter: "all",
     postingMethod: "post-all-sequential",
     isActive: true,
@@ -285,6 +284,8 @@ export async function PUT(request: Request) {
   const hasProxyPortField = payload.socks5ProxyPort !== undefined;
   const hasProxyUserField = payload.socks5ProxyUsername !== undefined;
   const hasProxyPasswordField = payload.socks5ProxyPassword !== undefined;
+  const hasProxyIdField = payload.proxyId !== undefined;
+  const incomingProxyId = payload.proxyId?.trim();
 
   const incomingProxyHost = hasProxyHostField ? payload.socks5ProxyHost?.trim() || undefined : undefined;
   const incomingProxyPortNumber = hasProxyPortField ? Number(payload.socks5ProxyPort) : undefined;
@@ -317,23 +318,15 @@ export async function PUT(request: Request) {
     );
   }
 
-  if (
-    payload.proxyId?.trim() &&
-    (hasIncomingManualProxyHost || hasIncomingManualProxyPort || hasIncomingManualProxyUser || hasIncomingManualProxyPassword)
-  ) {
-    return NextResponse.json(
-      { error: "Choose one proxy mechanism: saved proxy OR manual proxy fields." },
-      { status: 400 }
-    );
-  }
-
-  if (payload.proxyId) {
+  if (incomingProxyId) {
     const proxies = await readParquetRecords("proxies");
-    const selectedProxy = proxies.find((proxy) => proxy.id === payload.proxyId?.trim());
+    const selectedProxy = proxies.find((proxy) => proxy.id === incomingProxyId && proxy.enabled !== false);
     if (!selectedProxy) {
       return NextResponse.json({ error: "Proxy not found" }, { status: 404 });
     }
   }
+
+  const useSavedProxy = Boolean(incomingProxyId);
 
   const updated = {
     ...current[index],
@@ -345,13 +338,27 @@ export async function PUT(request: Request) {
     username: payload.username?.trim() ?? current[index].username,
     password: payload.password?.trim() ?? current[index].password,
     twoFactorSecret: payload.twoFactorSecret?.trim() || undefined,
-    proxyId: payload.proxyId?.trim() || undefined,
-    socks5ProxyHost: payload.socks5ProxyHost !== undefined ? payload.socks5ProxyHost.trim() || undefined : current[index].socks5ProxyHost,
-    socks5ProxyPort: payload.socks5ProxyPort !== undefined
+    proxyId: hasProxyIdField ? incomingProxyId || undefined : current[index].proxyId,
+    socks5ProxyHost: useSavedProxy
+      ? undefined
+      : payload.socks5ProxyHost !== undefined
+        ? payload.socks5ProxyHost.trim() || undefined
+        : current[index].socks5ProxyHost,
+    socks5ProxyPort: useSavedProxy
+      ? undefined
+      : payload.socks5ProxyPort !== undefined
       ? (Number.isFinite(Number(payload.socks5ProxyPort)) && Number(payload.socks5ProxyPort) > 0 ? Number(payload.socks5ProxyPort) : undefined)
       : current[index].socks5ProxyPort,
-    socks5ProxyUsername: payload.socks5ProxyUsername !== undefined ? payload.socks5ProxyUsername.trim() || undefined : current[index].socks5ProxyUsername,
-    socks5ProxyPassword: payload.socks5ProxyPassword !== undefined ? payload.socks5ProxyPassword.trim() || undefined : current[index].socks5ProxyPassword,
+    socks5ProxyUsername: useSavedProxy
+      ? undefined
+      : payload.socks5ProxyUsername !== undefined
+        ? payload.socks5ProxyUsername.trim() || undefined
+        : current[index].socks5ProxyUsername,
+    socks5ProxyPassword: useSavedProxy
+      ? undefined
+      : payload.socks5ProxyPassword !== undefined
+        ? payload.socks5ProxyPassword.trim() || undefined
+        : current[index].socks5ProxyPassword,
     disabledAt:
       payload.isActive === true
         ? undefined

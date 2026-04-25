@@ -195,14 +195,11 @@ export default function AccountsPage() {
     event.preventDefault();
 
     const formElement = event.currentTarget;
-    const submitter = (event.nativeEvent as SubmitEvent | undefined)?.submitter as HTMLButtonElement | null;
-    const autoLogin = submitter?.value !== "manual";
     const form = new FormData(formElement);
     const proxyHost = String(form.get("socks5ProxyHost") ?? "").trim();
     const proxyPortRaw = String(form.get("socks5ProxyPort") ?? "").trim();
     const proxyUsername = String(form.get("socks5ProxyUsername") ?? "").trim();
     const proxyPassword = String(form.get("socks5ProxyPassword") ?? "").trim();
-    const twoFactorSecret = String(form.get("twoFactorSecret") ?? "").trim();
     const proxyId = String(form.get("proxyId") ?? "").trim();
     const proxyPort = proxyPortRaw ? Number(proxyPortRaw) : undefined;
 
@@ -216,13 +213,11 @@ export default function AccountsPage() {
           alias: String(form.get("alias") ?? ""),
           username: String(form.get("username") ?? ""),
           password: String(form.get("password") ?? ""),
-          twoFactorSecret: twoFactorSecret || undefined,
           proxyId: proxyId || undefined,
           socks5ProxyHost: proxyHost || undefined,
           socks5ProxyPort: Number.isFinite(proxyPort) ? proxyPort : undefined,
           socks5ProxyUsername: proxyUsername || undefined,
           socks5ProxyPassword: proxyPassword || undefined,
-          autoLogin,
         }),
       });
     } catch (error) {
@@ -237,40 +232,15 @@ export default function AccountsPage() {
       return;
     }
 
-    const result = (await response.json()) as Account & {
-      loginSucceeded?: boolean;
-      loginProxyIp?: string;
-      loginMessage?: string;
-      loginAttempted?: boolean;
-    };
-
-    if (result.id && (result.loginMessage || result.loginProxyIp)) {
-      setLoginActivityState((prev) => ({
-        ...prev,
-        [result.id]: {
-          message: result.loginMessage,
-          proxyPublicIp: result.loginProxyIp,
-        },
-      }));
-    }
+    const result = (await response.json()) as Account;
 
     formElement?.reset();
     setShowAccountPassword(false);
     setOpen(false);
     await loadItems();
-
-    if (autoLogin) {
-      alert(
-        result.loginMessage ||
-          (result.loginSucceeded
-            ? "Account saved and automatic login completed."
-            : "Account saved, but automatic login did not complete.")
-      );
-      return;
-    }
+    alert("Account saved successfully.");
 
     if (!result.id) {
-      alert("Account saved manually. Use Manual Login from the account card to continue.");
       return;
     }
 
@@ -393,7 +363,6 @@ export default function AccountsPage() {
           alias: String(form.get("alias") ?? ""),
           username: String(form.get("username") ?? ""),
           password: String(form.get("password") ?? ""),
-          twoFactorSecret: String(form.get("twoFactorSecret") ?? ""),
           proxyId: String(form.get("proxyId") ?? ""),
           socks5ProxyHost: String(form.get("socks5ProxyHost") ?? ""),
           socks5ProxyPort: String(form.get("socks5ProxyPort") ?? ""),
@@ -970,12 +939,7 @@ export default function AccountsPage() {
                 >
                   Edit / Details
                 </button>
-                <button
-                  onClick={() => retryLogin(item.id)}
-                  className="btn-subtle text-xs"
-                >
-                  {sessionState[item.id] ? "Refresh Auto Login" : "Try Auto Login"}
-                </button>
+
                 <button
                   onClick={() => {
                     void startManualLogin(item);
@@ -1038,10 +1002,7 @@ export default function AccountsPage() {
                 </button>
               </div>
             </div>
-            <input name="twoFactorSecret" placeholder="2FA code or secret (optional)" className="modal-input" />
-            <p className="text-xs text-[#9fb4d5]">
-              Accepts either a 6-digit authentication code or a Base32 2FA secret. If you provide a secret, it is converted to a live code automatically.
-            </p>
+
             <label className="grid gap-1 text-sm">
               <span className="app-label">Saved Proxy (recommended)</span>
               <select name="proxyId" className="modal-input">
@@ -1070,9 +1031,7 @@ export default function AccountsPage() {
               <button type="submit" value="manual" className="btn-subtle rounded-lg px-4 py-2 font-semibold">
                 Save Manually
               </button>
-              <button type="submit" value="automatic" className="luxury-btn rounded-lg px-4 py-2 font-semibold">
-                Save &amp; Auto Login
-              </button>
+
             </div>
           </form>
         </Modal>
@@ -1263,10 +1222,7 @@ export default function AccountsPage() {
                 </button>
               </div>
             </div>
-            <input name="twoFactorSecret" defaultValue={editingAccount.twoFactorSecret || ""} placeholder="2FA code or secret (optional)" className="modal-input" />
-            <p className="text-xs text-[#9fb4d5]">
-              Accepts either a 6-digit authentication code or a Base32 2FA secret. Secret values are converted automatically when Facebook requests 2FA.
-            </p>
+
             <label className="grid gap-1 text-sm">
               <span className="app-label">Saved Proxy (recommended)</span>
               <select name="proxyId" defaultValue={editingAccount.proxyId || ""} className="modal-input">

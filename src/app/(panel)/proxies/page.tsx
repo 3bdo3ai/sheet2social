@@ -20,8 +20,27 @@ export default function ProxiesPage() {
   const [search, setSearch] = useState("");
   const [showSecrets, setShowSecrets] = useState(false);
 
+  async function readResponseMessage(response: Response): Promise<string | undefined> {
+    const text = await response.text();
+    if (!text.trim()) {
+      return undefined;
+    }
+
+    try {
+      const payload = JSON.parse(text) as { error?: string; message?: string };
+      return payload.error || payload.message;
+    } catch {
+      return text;
+    }
+  }
+
   async function loadData() {
     const res = await fetch("/api/admin/proxies");
+    if (!res.ok) {
+      const message = await readResponseMessage(res);
+      throw new Error(message || "Failed to load proxies");
+    }
+
     const data = (await res.json()) as {
       proxyRotationEnabled: boolean;
       items: ProxyItem[];
@@ -32,15 +51,24 @@ export default function ProxiesPage() {
   }
 
   useEffect(() => {
-    loadData();
+    loadData().catch((error) => {
+      const message = error instanceof Error ? error.message : "Failed to load proxies";
+      alert(message);
+    });
   }, []);
 
   async function saveAll(nextItems: ProxyItem[], nextEnabled = proxyRotationEnabled) {
-    await fetch("/api/admin/proxies", {
+    const response = await fetch("/api/admin/proxies", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ items: nextItems, proxyRotationEnabled: nextEnabled }),
     });
+
+    if (!response.ok) {
+      const message = await readResponseMessage(response);
+      alert(message || "Failed to save proxies");
+      return;
+    }
 
     await loadData();
   }
@@ -48,28 +76,48 @@ export default function ProxiesPage() {
   async function addProxy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const form = new FormData(event.currentTarget);
-    await fetch("/api/admin/proxies", {
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const port = Number(form.get("port") ?? 0);
+
+    if (!Number.isFinite(port) || port <= 0) {
+      alert("Please enter a valid proxy port.");
+      return;
+    }
+
+    const response = await fetch("/api/admin/proxies", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ipAddress: String(form.get("ipAddress") ?? ""),
-        port: Number(form.get("port") ?? 0),
+        port,
         username: String(form.get("username") ?? ""),
         password: String(form.get("password") ?? ""),
       }),
     });
 
-    event.currentTarget.reset();
+    if (!response.ok) {
+      const message = await readResponseMessage(response);
+      alert(message || "Failed to add proxy");
+      return;
+    }
+
+    formElement.reset();
     await loadData();
   }
 
   async function deleteProxy(id: string) {
-    await fetch("/api/admin/proxies", {
+    const response = await fetch("/api/admin/proxies", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
+
+    if (!response.ok) {
+      const message = await readResponseMessage(response);
+      alert(message || "Failed to remove proxy");
+      return;
+    }
 
     await loadData();
   }
@@ -135,7 +183,7 @@ export default function ProxiesPage() {
         <input name="port" required type="number" placeholder="Port" className="modal-input" />
         <input name="username" placeholder="Username" className="modal-input" />
         <input name="password" placeholder="Password" className="modal-input" />
-        <button type="submit" className="btn-success inline-flex items-center justify-center gap-2">
+        <button type="submit" className="luxury-btn inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 font-semibold">
           <PlusIcon className="h-4 w-4" />
           Add
         </button>
@@ -166,6 +214,7 @@ export default function ProxiesPage() {
                   <td className="px-4 py-3">{showSecrets ? item.password || "-" : item.password ? "********" : "-"}</td>
                   <td className="px-4 py-3">
                     <button
+                      type="button"
                       onClick={() => deleteProxy(item.id)}
                       className="btn-subtle text-xs"
                     >

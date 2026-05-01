@@ -19,42 +19,92 @@ export async function PUT(request: Request) {
     postsPerSession?: number;
     commentWithPostImage?: boolean;
     proxyRotationEnabled?: boolean;
+    visibleBrowser?: boolean;
   };
 
-  const parallelAccounts = Number(body.parallelAccounts);
-  const waitIntervalMinutes = Number(body.waitIntervalMinutes);
-  const delayBetweenAccountsMinutes = Number(body.delayBetweenAccountsMinutes);
-  const postsPerGroup = Number(body.postsPerGroup);
-  const maxPostsPerAccountPerCycle = Number(body.maxPostsPerAccountPerCycle);
-  const postsPerSession = Number(body.postsPerSession);
+  const nextSettings: {
+    parallelAccounts?: number;
+    waitIntervalMinutes?: number;
+    delayBetweenAccountsMinutes?: number;
+    postsPerGroup?: number;
+    maxPostsPerAccountPerCycle?: number;
+    postsPerSession?: number;
+    commentWithPostImage?: boolean;
+    proxyRotationEnabled?: boolean;
+    visibleBrowser?: boolean;
+  } = {};
 
-  if (
-    !parallelAccounts ||
-    !waitIntervalMinutes ||
-    Number.isNaN(delayBetweenAccountsMinutes) ||
-    !postsPerGroup ||
-    !maxPostsPerAccountPerCycle ||
-    !postsPerSession
-  ) {
-    return NextResponse.json(
-      {
-        error:
-          "parallelAccounts, waitIntervalMinutes, delayBetweenAccountsMinutes, postsPerGroup, maxPostsPerAccountPerCycle, and postsPerSession are required",
-      },
-      { status: 400 }
-    );
+  if (body.parallelAccounts !== undefined) {
+    const value = Number(body.parallelAccounts);
+    if (!Number.isFinite(value) || value <= 0) {
+      return NextResponse.json({ error: "parallelAccounts must be a positive number" }, { status: 400 });
+    }
+    nextSettings.parallelAccounts = value;
   }
 
-  const nextState = await writeAutomationSettings({
-    parallelAccounts,
-    waitIntervalMinutes,
-    delayBetweenAccountsMinutes,
-    postsPerGroup,
-    maxPostsPerAccountPerCycle,
-    postsPerSession,
-    commentWithPostImage: body.commentWithPostImage ?? false,
-    proxyRotationEnabled: body.proxyRotationEnabled,
-  });
+  if (body.waitIntervalMinutes !== undefined) {
+    const value = Number(body.waitIntervalMinutes);
+    if (!Number.isFinite(value) || value <= 0) {
+      return NextResponse.json({ error: "waitIntervalMinutes must be a positive number" }, { status: 400 });
+    }
+    nextSettings.waitIntervalMinutes = value;
+  }
+
+  if (body.delayBetweenAccountsMinutes !== undefined) {
+    const value = Number(body.delayBetweenAccountsMinutes);
+    if (!Number.isFinite(value) || value < 0) {
+      return NextResponse.json(
+        { error: "delayBetweenAccountsMinutes must be zero or a positive number" },
+        { status: 400 }
+      );
+    }
+    nextSettings.delayBetweenAccountsMinutes = value;
+  }
+
+  if (body.postsPerGroup !== undefined) {
+    const value = Number(body.postsPerGroup);
+    if (!Number.isFinite(value) || value <= 0) {
+      return NextResponse.json({ error: "postsPerGroup must be a positive number" }, { status: 400 });
+    }
+    nextSettings.postsPerGroup = value;
+  }
+
+  if (body.maxPostsPerAccountPerCycle !== undefined) {
+    const value = Number(body.maxPostsPerAccountPerCycle);
+    if (!Number.isFinite(value) || value <= 0) {
+      return NextResponse.json(
+        { error: "maxPostsPerAccountPerCycle must be a positive number" },
+        { status: 400 }
+      );
+    }
+    nextSettings.maxPostsPerAccountPerCycle = value;
+  }
+
+  if (body.postsPerSession !== undefined) {
+    const value = Number(body.postsPerSession);
+    if (!Number.isFinite(value) || value <= 0) {
+      return NextResponse.json({ error: "postsPerSession must be a positive number" }, { status: 400 });
+    }
+    nextSettings.postsPerSession = value;
+  }
+
+  if (typeof body.commentWithPostImage === "boolean") {
+    nextSettings.commentWithPostImage = body.commentWithPostImage;
+  }
+
+  if (typeof body.proxyRotationEnabled === "boolean") {
+    nextSettings.proxyRotationEnabled = body.proxyRotationEnabled;
+  }
+
+  if (typeof body.visibleBrowser === "boolean") {
+    nextSettings.visibleBrowser = body.visibleBrowser;
+  }
+
+  if (Object.keys(nextSettings).length === 0) {
+    return NextResponse.json({ error: "No valid settings provided" }, { status: 400 });
+  }
+
+  const nextState = await writeAutomationSettings(nextSettings);
 
   return NextResponse.json(nextState.settings);
 }

@@ -15,6 +15,7 @@ export interface AutomationSettings {
   postsPerSession: number;
   commentWithPostImage: boolean;
   proxyRotationEnabled: boolean;
+  visibleBrowser: boolean;
 }
 
 export interface AutomationStateRecord {
@@ -36,6 +37,7 @@ const DEFAULT_AUTOMATION_STATE: AutomationStateRecord = {
     postsPerSession: 20,
     commentWithPostImage: false,
     proxyRotationEnabled: false,
+    visibleBrowser: false,
   },
   updatedAt: new Date(0).toISOString(),
 };
@@ -108,6 +110,10 @@ export async function readAutomationState(): Promise<AutomationStateRecord> {
     );
     const fallbackPostsPerSession =
       normalizedParallelAccounts * normalizedMaxPostsPerAccountPerCycle;
+    const normalizedVisibleBrowser =
+      typeof rawSettings?.visibleBrowser === "boolean"
+        ? rawSettings.visibleBrowser
+        : DEFAULT_AUTOMATION_STATE.settings.visibleBrowser;
 
     return {
       state: parsed.state,
@@ -135,6 +141,7 @@ export async function readAutomationState(): Promise<AutomationStateRecord> {
                 typeof rawSettings.proxyRotationEnabled === "boolean"
                   ? rawSettings.proxyRotationEnabled
                   : DEFAULT_AUTOMATION_STATE.settings.proxyRotationEnabled,
+              visibleBrowser: normalizedVisibleBrowser,
             }
           : DEFAULT_AUTOMATION_STATE.settings,
       updatedAt: parsed.updatedAt ?? DEFAULT_AUTOMATION_STATE.updatedAt,
@@ -213,6 +220,10 @@ export async function writeAutomationSettings(
       settings.commentWithPostImage ?? current.settings.commentWithPostImage,
     proxyRotationEnabled:
       settings.proxyRotationEnabled ?? current.settings.proxyRotationEnabled,
+    visibleBrowser:
+      typeof settings.visibleBrowser === "boolean"
+        ? settings.visibleBrowser
+        : current.settings.visibleBrowser,
   };
 
   const nextState: AutomationStateRecord = {

@@ -1570,18 +1570,18 @@ async function initializeBrowser(
     }
 
     let proxyPublicIp: string | undefined;
+    let proxyIpDetectionWarning: string | undefined;
 
     try {
       if (proxyConfig) {
         proxyPublicIp = await detectActivePublicIp(driver);
 
         if (!proxyPublicIp) {
-          throw new Error(
-            `The proxy is configured (${proxyConfig.host}:${proxyConfig.port}) but its public IP could not be detected.`
-          );
+          proxyIpDetectionWarning = `The proxy is configured (${proxyConfig.host}:${proxyConfig.port}) but its public IP could not be detected from the IP-check endpoints.`;
+          console.warn(`[Proxy] ${proxyIpDetectionWarning}`);
         }
 
-        if (machinePublicIp && proxyPublicIp === machinePublicIp) {
+        if (machinePublicIp && proxyPublicIp && proxyPublicIp === machinePublicIp) {
           throw new Error(
             `Proxy protocol ${proxyProtocol} resolved to machine IP (${proxyPublicIp}) instead of proxy output.`
           );

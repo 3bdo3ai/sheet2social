@@ -24,6 +24,7 @@ type AutomationStatePayload = {
     waitIntervalMinutes?: number;
     maxPostsPerAccountPerCycle?: number;
     postsPerSession?: number;
+    visibleBrowser?: boolean;
   };
 };
 
@@ -304,6 +305,7 @@ export default function AutomationPage() {
     waitIntervalMinutes: number;
     maxPostsPerAccountPerCycle: number;
     postsPerSession: number;
+    visibleBrowser: boolean;
   } | null>(null);
   const [state, setState] = useState<"running" | "stopped">("stopped");
   const [pendingState, setPendingState] = useState<"running" | "stopped" | null>(null);
@@ -318,6 +320,7 @@ export default function AutomationPage() {
   const [requestError, setRequestError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement | null>(null);
   const transitionStartedAtRef = useRef<number>(0);
+  const visibleBrowserEnabled = runtimeSettings?.visibleBrowser ?? false;
 
   const displayState = pendingState ?? state;
 
@@ -358,6 +361,7 @@ export default function AutomationPage() {
           incomingSettings.maxPostsPerAccountPerCycle,
           1
         );
+        const visibleBrowser = Boolean(incomingSettings.visibleBrowser);
 
         setRuntimeSettings({
           parallelAccounts,
@@ -367,6 +371,7 @@ export default function AutomationPage() {
             incomingSettings.postsPerSession,
             parallelAccounts * maxPostsPerAccountPerCycle
           ),
+          visibleBrowser,
         });
       } else {
         setRuntimeSettings(null);
@@ -583,6 +588,44 @@ export default function AutomationPage() {
     }
   }
 
+  async function toggleVisibleBrowser() {
+    if (!runtimeSettings) {
+      return;
+    }
+
+    const previousValue = runtimeSettings.visibleBrowser;
+    const nextValue = !previousValue;
+    setRuntimeSettings({ ...runtimeSettings, visibleBrowser: nextValue });
+    setRequestError(null);
+
+    try {
+      const response = await fetch("/api/admin/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ visibleBrowser: nextValue }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to update browser visibility");
+      }
+
+      const payload = (await response.json()) as Partial<AutomationStatePayload["settings"]>;
+      setRuntimeSettings((current) =>
+        current
+          ? {
+              ...current,
+              visibleBrowser: Boolean(payload?.visibleBrowser ?? nextValue),
+            }
+          : current
+      );
+    } catch (error) {
+      setRuntimeSettings((current) =>
+        current ? { ...current, visibleBrowser: previousValue } : current
+      );
+      setRequestError(error instanceof Error ? error.message : "Unknown browser-visibility error");
+    }
+  }
+
   return (
     <section className="space-y-5 animate-reveal-up">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -600,6 +643,15 @@ export default function AutomationPage() {
               ? "Running"
               : "Stopped"}
           </span>
+          <button
+            onClick={() => void toggleVisibleBrowser()}
+            disabled={!runtimeSettings}
+            className={`btn-subtle inline-flex items-center gap-1.5 text-xs disabled:opacity-60 ${
+              visibleBrowserEnabled ? "border-[#3e7d5d] text-[#c6f0dd]" : "text-[#f0c7cf]"
+            }`}
+          >
+            {visibleBrowserEnabled ? "Browser Visible" : "Browser Headless"}
+          </button>
           <button
             onClick={() => setAutomation("running")}
             disabled={isStateMutating || displayState === "running"}

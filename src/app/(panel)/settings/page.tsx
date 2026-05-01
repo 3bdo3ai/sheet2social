@@ -11,6 +11,7 @@ type Settings = {
   postsPerSession: number;
   commentWithPostImage: boolean;
   proxyRotationEnabled: boolean;
+  visibleBrowser: boolean;
 };
 
 type DashboardStats = {
@@ -29,6 +30,7 @@ const defaultSettings: Settings = {
   postsPerSession: 20,
   commentWithPostImage: false,
   proxyRotationEnabled: false,
+  visibleBrowser: false,
 };
 
 export default function SettingsPage() {
@@ -44,10 +46,15 @@ export default function SettingsPage() {
       data.maxPostsPerAccountPerCycle ?? defaultSettings.maxPostsPerAccountPerCycle
     );
     const fallbackPostsPerSession = Math.max(1, parallelAccounts * maxPostsPerAccountPerCycle);
+    const visibleBrowser =
+      typeof data.visibleBrowser === "boolean"
+        ? data.visibleBrowser
+        : defaultSettings.visibleBrowser;
 
     setSettings({
       ...defaultSettings,
       ...data,
+      visibleBrowser,
       postsPerSession: Math.max(1, Math.floor(Number(data.postsPerSession ?? fallbackPostsPerSession))),
     });
   }
@@ -130,6 +137,9 @@ export default function SettingsPage() {
           <p className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
             Comment image mode: {settings.commentWithPostImage ? "enabled" : "disabled"}.
           </p>
+          <p className="rounded-lg border border-[var(--border)] bg-[#0f1f3a] px-3 py-2">
+            Browser visibility: {settings.visibleBrowser ? "visible" : "headless"}.
+          </p>
         </div>
         <button type="button" onClick={resetDefaults} className="btn-subtle mt-4 text-xs">
           Reset To Defaults
@@ -197,6 +207,25 @@ export default function SettingsPage() {
           <span>
             <span className="block font-semibold">Comment with Post Image</span>
             <span className="block text-sm text-[#a2b7d7]">Attach post image in comments when a comment exists.</span>
+          </span>
+        </label>
+
+        <label className="app-card flex items-center gap-2 px-4 py-4">
+          <input
+            type="checkbox"
+            checked={settings.visibleBrowser}
+            onChange={(event) =>
+              setSettings((prev) => ({
+                ...prev,
+                visibleBrowser: event.target.checked,
+              }))
+            }
+          />
+          <span>
+            <span className="block font-semibold">Visible Browser Mode</span>
+            <span className="block text-sm text-[#a2b7d7]">
+              Show the automation browser window for debugging. Keep off for normal headless runs.
+            </span>
           </span>
         </label>
       </form>
